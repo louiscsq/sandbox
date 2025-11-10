@@ -109,6 +109,25 @@ Ensure you have:
 
 Once deployment is complete, verify the setup directly within your Databricks workspace to ensure all components are correctly configured.
 
+## 📊 Telemetry
+
+This project includes optional anonymous telemetry to help us understand usage patterns and improve the uc-quickstart project. The telemetry collects:
+- Cloud provider (AWS/Azure)
+- Version information
+- Deployment timestamp
+
+**No sensitive data or customer information is collected.**
+
+### Disabling Telemetry
+
+To disable telemetry, set the following variable in your `terraform.tfvars`:
+
+```hcl
+enable_telemetry = false
+```
+
+Telemetry is enabled by default and can be disabled at any time.
+
 ## 🔧 Need Help?
 
 For cloud-specific troubleshooting and detailed configuration help:

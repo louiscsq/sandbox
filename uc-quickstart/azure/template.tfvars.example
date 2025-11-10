@@ -16,4 +16,6 @@ azure_tenant_id          = "" // The Azure Tenant ID the service principal resid
 resource_group           = "" // The resource group where storage accounts & access connectors will be deployed to
 
 
-
+# Telemetry (Optional)
+# enable_telemetry = true // Set to false to disable anonymous usage telemetry
+# uc_quickstart_version = "1.0.0" // Version identifier for telemetry tracking

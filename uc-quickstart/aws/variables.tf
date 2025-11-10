@@ -96,3 +96,16 @@ variable "catalog_3_permissions" {
     group_3 = ["ALL_PRIVILEGES"]
   }
 }
+
+# Telemetry variables
+variable "enable_telemetry" {
+  description = "Enable telemetry to help improve uc-quickstart. Set to false to disable."
+  type        = bool
+  default     = true
+}
+
+variable "uc_quickstart_version" {
+  description = "Version of uc-quickstart for telemetry tracking"
+  type        = string
+  default     = "1.0.0"
+}

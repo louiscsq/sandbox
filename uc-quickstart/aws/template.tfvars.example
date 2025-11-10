@@ -12,3 +12,7 @@ aws_secret_key    = "XXX" // Specifies the secret key associated with the access
 aws_account_id    = "XXX" // AWS account ID where resources will be deployed.
 aws_session_token = "XXXX" // - Optional Specifies the session token value that is required if you are using temporary security credentials that you retrieved directly from AWS Security Token Service operations.
 
+
+# Telemetry (Optional)
+# enable_telemetry = true // Set to false to disable anonymous usage telemetry
+# uc_quickstart_version = "1.0.0" // Version identifier for telemetry tracking
