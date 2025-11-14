@@ -109,3 +109,9 @@ variable "uc_quickstart_version" {
   type        = string
   default     = "1.0.0"
 }
+
+variable "databricks_provider_version" {
+  description = "Version of Databricks Terraform provider for telemetry tracking"
+  type        = string
+  default     = "1.91.0"
+}

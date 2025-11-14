@@ -2,7 +2,9 @@
 # This resource sends anonymous usage data to help improve the uc-quickstart project
 
 locals {
-  telemetry_string = "uc-quickstart/terraform/${var.uc_quickstart_version} aws"
+  # RFC 9110 compliant User-Agent format: product/version [product/version ...] [(comments)]
+  # Similar to Python SDK's with_product() and with_extra() methods
+  telemetry_string = "uc-quickstart/${var.uc_quickstart_version} terraform-provider-databricks/${var.databricks_provider_version} (terraform; aws)"
 }
 
 resource "null_resource" "telemetry_ping" {

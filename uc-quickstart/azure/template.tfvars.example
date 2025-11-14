@@ -19,3 +19,4 @@ resource_group           = "" // The resource group where storage accounts & acc
 # Telemetry (Optional)
 # enable_telemetry = true // Set to false to disable anonymous usage telemetry
 # uc_quickstart_version = "1.0.0" // Version identifier for telemetry tracking
+# databricks_provider_version = "1.91.0" // Databricks Terraform provider version for telemetry
