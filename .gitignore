@@ -191,3 +191,10 @@ coverage.txt
 **/terraform.tfstate.d/**
 **/*.tfvars
 uc-quickstart/utils/genie/aws/envs/**/main.tf
+
+# Re-include non-secret governance configs for the genie/aws ABAC tool.
+# auth.auto.tfvars stays blocked (contains Databricks credentials).
+# These files are safe to commit: they contain policy definitions, not secrets.
+!uc-quickstart/utils/genie/aws/envs/**/env.auto.tfvars
+!uc-quickstart/utils/genie/aws/envs/**/abac.auto.tfvars
+!uc-quickstart/utils/genie/aws/envs/**/masking_functions.sql

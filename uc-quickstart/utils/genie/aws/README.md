@@ -92,6 +92,7 @@ make apply ENV=bu2
 
 - [Flows](docs/flows.md): quickstart, promotion, separate BU environment, destroy/reset
 - [Architecture](docs/architecture.md): layers, artifact ownership, config files, Genie Space behavior, make targets
+- [CI/CD Integration](docs/cicd.md): how to validate and deploy this quickstart from a pipeline
 - [Troubleshooting](docs/troubleshooting.md): imports, provider quirks, brownfield workflows
 - [Advanced Usage](docs/advanced.md): generation options, IDP-synced groups, ABAC-only mode, masking UDF reuse, multi-environment layout, legacy migration
 

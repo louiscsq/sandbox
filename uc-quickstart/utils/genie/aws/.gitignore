@@ -22,10 +22,18 @@ auth.auto.tfvars
 
 # Auto-fetched DDLs in workspace envs (user-specific)
 ddl/_fetched.sql
+envs/*/ddl/_fetched.sql
+
+# Local apply fingerprint files (ephemeral, machine-specific)
+envs/*/.*.apply.sha
+envs/*/data_access/.*.apply.sha
 
 # AI-generated output in workspace envs (user-specific)
 generated/
 masking_functions.sql
+# Re-include the deployed/split masking SQL (safe to commit; not a secret).
+# The generated draft (generated/masking_functions.sql) stays ignored via generated/ above.
+!envs/*/data_access/masking_functions.sql
 
 # Auto-created Genie Space ID (managed by Terraform lifecycle)
 .genie_space_id
