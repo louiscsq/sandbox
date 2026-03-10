@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Genie Space: create / set-acls / trash
+# Genie Space: create / update-config / set-acls / trash
 # =============================================================================
 # Commands:
-#   create    Create a Genie Space with configured tables and set ACLs.
-#             Wildcards (catalog.schema.*) are expanded via the UC Tables API.
-#             (POST /api/2.0/genie/spaces, then PUT permissions for groups).
-#   set-acls  Set CAN_RUN on an existing Genie Space for the configured groups.
-#   trash     Move a Genie Space to trash. Reads space_id from GENIE_ID_FILE.
+#   create        Create a minimal Genie Space (tables + warehouse + title).
+#                 Wildcards (catalog.schema.*) are expanded via UC Tables API.
+#   update-config Update a Genie Space's full configuration via PATCH API.
+#                 Reads space_id from GENIE_ID_FILE.
+#   set-acls      Set CAN_RUN on a Genie Space for the configured groups.
+#                 Reads space_id from GENIE_SPACE_OBJECT_ID or GENIE_ID_FILE.
+#   trash         Move a Genie Space to trash. Reads space_id from GENIE_ID_FILE.
 #
 # Authentication (in order of precedence):
 #   1. DATABRICKS_TOKEN (PAT) - if set, used directly
@@ -144,7 +146,8 @@ expand_tables() {
   local expanded=()
 
   for entry in "${RAW_ENTRIES[@]}"; do
-    entry=$(echo "$entry" | xargs)  # trim whitespace
+    entry="${entry#"${entry%%[![:space:]]*}"}"
+    entry="${entry%"${entry##*[![:space:]]}"}"
     if [[ "$entry" == *.* && "$entry" == *.\* ]]; then
       # Wildcard: catalog.schema.*
       local catalog schema
@@ -220,7 +223,7 @@ set_genie_acls() {
   echo "Genie Space ACLs updated successfully."
 }
 
-# ---------- Create Genie Space with configured tables then set ACLs ----------
+# ---------- Create Genie Space (minimal: tables + warehouse + title) ----------
 create_genie_space() {
   local workspace_url="$1"
   local token="$2"
@@ -234,7 +237,6 @@ create_genie_space() {
     exit 1
   fi
 
-  # Expand wildcards before building the API payload
   local resolved_csv
   resolved_csv=$(expand_tables "$workspace_url" "$token" "$GENIE_TABLES_CSV")
   IFS=',' read -ra TABLE_LIST <<< "$resolved_csv"
@@ -252,146 +254,20 @@ create_genie_space() {
   local tables_csv
   tables_csv=$(IFS=','; echo "${sorted_identifiers[*]}")
 
-  # Build create + patch bodies via Python for correct JSON escaping.
-  # The CREATE endpoint doesn't reliably accept sql_snippets/join_specs,
-  # so we create first with core config, then PATCH to add them.
-  local python_output
-  python_output=$(python3 << PYEOF
-import json, random, datetime, os
-
-def gen_id():
-    t = int((datetime.datetime.now() - datetime.datetime(1582,10,15)).total_seconds() * 1e7)
-    hi = (t & 0xFFFFFFFFFFFF0000) | (1 << 12) | ((t & 0xFFFF) >> 4)
-    lo = random.getrandbits(62) | 0x8000000000000000
-    return f"{hi:016x}{lo:016x}"
+  local create_body
+  create_body=$(python3 << PYEOF
+import json
 
 tables = [{"identifier": t} for t in sorted("${tables_csv}".split(",")) if t]
-
 space = {"version": 2, "data_sources": {"tables": tables}}
-
-# Sample questions
-sq_json = os.environ.get("GENIE_SAMPLE_QUESTIONS", "")
-if sq_json:
-    try:
-        questions = json.loads(sq_json)
-        if questions:
-            items = [{"id": gen_id(), "question": [q]} for q in questions]
-            items.sort(key=lambda x: x["id"])
-            space.setdefault("config", {})["sample_questions"] = items
-    except json.JSONDecodeError:
-        pass
-
-# Text instructions
-instr = os.environ.get("GENIE_INSTRUCTIONS", "")
-if instr:
-    space.setdefault("instructions", {})["text_instructions"] = [
-        {"id": gen_id(), "content": [instr]}
-    ]
-
-# Benchmarks
-bm_json = os.environ.get("GENIE_BENCHMARKS", "")
-if bm_json:
-    try:
-        benchmarks = json.loads(bm_json)
-        if benchmarks:
-            items = []
-            for bm in benchmarks:
-                items.append({
-                    "id": gen_id(),
-                    "question": [bm["question"]],
-                    "answer": [{"format": "SQL", "content": [bm["sql"]]}]
-                })
-            items.sort(key=lambda x: x["id"])
-            space["benchmarks"] = {"questions": items}
-    except json.JSONDecodeError:
-        pass
-
 body = {
     "warehouse_id": "${warehouse_id}",
     "title": "${title}",
     "serialized_space": json.dumps(space, separators=(',', ':'))
 }
-desc = os.environ.get("GENIE_DESCRIPTION", "")
-if desc:
-    body["description"] = desc
-
-# Build patch space with sql_snippets and join_specs (applied after create)
-has_patch = False
-patch_instructions = dict(space.get("instructions", {}))
-
-filt_json = os.environ.get("GENIE_SQL_FILTERS", "")
-if filt_json:
-    try:
-        filters = json.loads(filt_json)
-        if filters:
-            items = [{"id": gen_id(), "sql": [f["sql"]], "display_name": f["display_name"]} for f in filters]
-            items.sort(key=lambda x: x["id"])
-            patch_instructions.setdefault("sql_snippets", {})["filters"] = items
-            has_patch = True
-    except json.JSONDecodeError:
-        pass
-
-expr_json = os.environ.get("GENIE_SQL_EXPRESSIONS", "")
-if expr_json:
-    try:
-        expressions = json.loads(expr_json)
-        if expressions:
-            items = [{"id": gen_id(), "alias": e["alias"], "sql": [e["sql"]]} for e in expressions]
-            items.sort(key=lambda x: x["id"])
-            patch_instructions.setdefault("sql_snippets", {})["expressions"] = items
-            has_patch = True
-    except json.JSONDecodeError:
-        pass
-
-meas_json = os.environ.get("GENIE_SQL_MEASURES", "")
-if meas_json:
-    try:
-        measures = json.loads(meas_json)
-        if measures:
-            items = [{"id": gen_id(), "alias": m["alias"], "sql": [m["sql"]]} for m in measures]
-            items.sort(key=lambda x: x["id"])
-            patch_instructions.setdefault("sql_snippets", {})["measures"] = items
-            has_patch = True
-    except json.JSONDecodeError:
-        pass
-
-join_json = os.environ.get("GENIE_JOIN_SPECS", "")
-if join_json:
-    try:
-        joins = json.loads(join_json)
-        if joins:
-            items = []
-            for j in joins:
-                items.append({
-                    "id": gen_id(),
-                    "left": {"identifier": j["left_table"]},
-                    "right": {"identifier": j["right_table"]},
-                    "sql": [j["sql"]],
-                })
-            items.sort(key=lambda x: x["id"])
-            patch_instructions["join_specs"] = items
-            has_patch = True
-    except json.JSONDecodeError:
-        pass
-
-patch_body = None
-if has_patch:
-    patch_space = dict(space)
-    patch_space["instructions"] = patch_instructions
-    patch_body = {"serialized_space": json.dumps(patch_space, separators=(',', ':'))}
-
-output = {"create": body}
-if patch_body:
-    output["patch"] = patch_body
-print(json.dumps(output))
+print(json.dumps(body))
 PYEOF
   )
-
-  local create_body
-  create_body=$(echo "$python_output" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['create']))")
-
-  local patch_body
-  patch_body=$(echo "$python_output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d['patch']) if 'patch' in d else '')")
 
   local tables_display
   tables_display=$(printf '%s\n' "${sorted_identifiers[@]}" | tr '\n' ' ')
@@ -433,45 +309,225 @@ PYEOF
 
   echo "Genie Space created: ${space_id}"
 
-  # Save space_id to file for Terraform lifecycle (destroy)
   if [[ -n "${GENIE_ID_FILE:-}" ]]; then
     echo "$space_id" > "$GENIE_ID_FILE"
     echo "Space ID saved to ${GENIE_ID_FILE}"
   fi
 
-  # PATCH to add sql_snippets and join_specs (not supported on CREATE)
-  if [[ -n "$patch_body" ]]; then
-    echo "Updating Genie Space with sql_snippets and join_specs..."
-    local patch_tmpfile
-    patch_tmpfile=$(mktemp)
-    echo "$patch_body" > "$patch_tmpfile"
+  echo "Done. Genie Space ID: ${space_id}"
+}
 
-    local patch_response
-    patch_response=$(curl -s -w "\n%{http_code}" -X PATCH \
-      -H "${UA_HEADER}" \
-      -H "Authorization: Bearer ${token}" \
-      -H "Content-Type: application/json" \
-      -d @"${patch_tmpfile}" \
-      "${workspace_url}/api/2.0/genie/spaces/${space_id}")
-    rm -f "$patch_tmpfile"
+# ---------- Update Genie Space config via PATCH ----------
+update_genie_config() {
+  local workspace_url="${DATABRICKS_HOST}"
+  workspace_url="${workspace_url%/}"
 
-    local patch_http_code
-    patch_http_code=$(echo "$patch_response" | tail -n1)
+  if [[ -z "$workspace_url" ]]; then
+    echo "Need workspace URL. Set DATABRICKS_HOST." >&2
+    exit 1
+  fi
 
-    if [[ "$patch_http_code" == "200" || "$patch_http_code" == "201" ]]; then
-      echo "Genie Space updated with sql_snippets and join_specs."
-    else
-      local patch_response_body
-      patch_response_body=$(echo "$patch_response" | sed '$d')
-      echo "WARNING: Failed to update Genie Space with sql_snippets/join_specs (HTTP ${patch_http_code})."
-      echo "  API response: ${patch_response_body}"
-      echo "  The space was created successfully. You can add sql_snippets and join_specs manually via the Genie UI."
+  local token
+  token=$(resolve_token "$workspace_url" "") || exit 1
+
+  if [[ -z "${GENIE_ID_FILE:-}" || ! -f "${GENIE_ID_FILE}" ]]; then
+    echo "ERROR: Genie Space ID file not found at '${GENIE_ID_FILE:-<not set>}'." >&2
+    echo "  The space may have been deleted outside Terraform." >&2
+    echo "  To recover: terraform taint 'null_resource.genie_space_create[0]'" >&2
+    exit 1
+  fi
+
+  local space_id
+  space_id=$(cat "${GENIE_ID_FILE}" | tr -d '[:space:]')
+
+  if [[ -z "$space_id" ]]; then
+    echo "ERROR: Genie Space ID file is empty." >&2
+    echo "  To recover: terraform taint 'null_resource.genie_space_create[0]'" >&2
+    exit 1
+  fi
+
+  if [[ -z "${GENIE_TABLES_CSV:-}" ]]; then
+    echo "ERROR: GENIE_TABLES_CSV not set." >&2
+    exit 1
+  fi
+
+  local resolved_csv
+  resolved_csv=$(expand_tables "$workspace_url" "$token" "$GENIE_TABLES_CSV")
+
+  build_patch_body() {
+    local skip_join_specs="${1:-0}"
+    GENIE_SKIP_JOIN_SPECS="$skip_join_specs" python3 << PYEOF
+import json, random, datetime, os
+
+def gen_id():
+    t = int((datetime.datetime.now() - datetime.datetime(1582,10,15)).total_seconds() * 1e7)
+    hi = (t & 0xFFFFFFFFFFFF0000) | (1 << 12) | ((t & 0xFFFF) >> 4)
+    lo = random.getrandbits(62) | 0x8000000000000000
+    return f"{hi:016x}{lo:016x}"
+
+tables = [{"identifier": t} for t in sorted("${resolved_csv}".split(",")) if t]
+space = {"version": 2, "data_sources": {"tables": tables}}
+
+sq_json = os.environ.get("GENIE_SAMPLE_QUESTIONS", "")
+if sq_json and sq_json != "[]":
+    try:
+        questions = json.loads(sq_json)
+        if questions:
+            items = [{"id": gen_id(), "question": [q]} for q in questions]
+            items.sort(key=lambda x: x["id"])
+            space.setdefault("config", {})["sample_questions"] = items
+    except json.JSONDecodeError:
+        pass
+
+instr = os.environ.get("GENIE_INSTRUCTIONS", "")
+if instr:
+    space.setdefault("instructions", {})["text_instructions"] = [
+        {"id": gen_id(), "content": [instr]}
+    ]
+
+bm_json = os.environ.get("GENIE_BENCHMARKS", "")
+if bm_json and bm_json != "[]":
+    try:
+        benchmarks = json.loads(bm_json)
+        if benchmarks:
+            items = []
+            for bm in benchmarks:
+                items.append({
+                    "id": gen_id(),
+                    "question": [bm["question"]],
+                    "answer": [{"format": "SQL", "content": [bm["sql"]]}]
+                })
+            items.sort(key=lambda x: x["id"])
+            space["benchmarks"] = {"questions": items}
+    except json.JSONDecodeError:
+        pass
+
+instructions = space.get("instructions", {})
+
+filt_json = os.environ.get("GENIE_SQL_FILTERS", "")
+if filt_json and filt_json != "[]":
+    try:
+        filters = json.loads(filt_json)
+        if filters:
+            items = [{"id": gen_id(), "sql": [f["sql"]], "display_name": f["display_name"]} for f in filters]
+            items.sort(key=lambda x: x["id"])
+            instructions.setdefault("sql_snippets", {})["filters"] = items
+    except json.JSONDecodeError:
+        pass
+
+expr_json = os.environ.get("GENIE_SQL_EXPRESSIONS", "")
+if expr_json and expr_json != "[]":
+    try:
+        expressions = json.loads(expr_json)
+        if expressions:
+            items = [{"id": gen_id(), "alias": e["alias"], "sql": [e["sql"]]} for e in expressions]
+            items.sort(key=lambda x: x["id"])
+            instructions.setdefault("sql_snippets", {})["expressions"] = items
+    except json.JSONDecodeError:
+        pass
+
+meas_json = os.environ.get("GENIE_SQL_MEASURES", "")
+if meas_json and meas_json != "[]":
+    try:
+        measures = json.loads(meas_json)
+        if measures:
+            items = [{"id": gen_id(), "alias": m["alias"], "sql": [m["sql"]]} for m in measures]
+            items.sort(key=lambda x: x["id"])
+            instructions.setdefault("sql_snippets", {})["measures"] = items
+    except json.JSONDecodeError:
+        pass
+
+join_json = os.environ.get("GENIE_JOIN_SPECS", "")
+skip_join_specs = os.environ.get("GENIE_SKIP_JOIN_SPECS", "0") == "1"
+if not skip_join_specs and join_json and join_json != "[]":
+    try:
+        joins = json.loads(join_json)
+        if joins:
+            items = []
+            for j in joins:
+                items.append({
+                    "id": gen_id(),
+                    "left": {"identifier": j["left_table"]},
+                    "right": {"identifier": j["right_table"]},
+                    "sql": [j["sql"]],
+                })
+            items.sort(key=lambda x: x["id"])
+            instructions["join_specs"] = items
+    except json.JSONDecodeError:
+        pass
+
+if instructions:
+    space["instructions"] = instructions
+
+warehouse_id = os.environ.get("GENIE_WAREHOUSE_ID", "")
+title = os.environ.get("GENIE_TITLE", "")
+desc = os.environ.get("GENIE_DESCRIPTION", "")
+
+body = {"serialized_space": json.dumps(space, separators=(',', ':'))}
+if warehouse_id:
+    body["warehouse_id"] = warehouse_id
+if title:
+    body["title"] = title
+if desc:
+    body["description"] = desc
+
+print(json.dumps(body))
+PYEOF
+  }
+
+  local patch_body
+  patch_body=$(build_patch_body 0)
+
+  echo "Updating Genie Space ${space_id} config..."
+
+  local tmpfile
+  tmpfile=$(mktemp)
+  echo "$patch_body" > "$tmpfile"
+
+  local response
+  response=$(curl -s -w "\n%{http_code}" -X PATCH \
+    -H "${UA_HEADER}" \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json" \
+    -d @"${tmpfile}" \
+    "${workspace_url}/api/2.0/genie/spaces/${space_id}")
+
+  local http_code
+  http_code=$(echo "$response" | tail -n1)
+  local response_body
+  response_body=$(echo "$response" | sed '$d')
+
+  if [[ "$http_code" != "200" && "$http_code" != "201" && -n "${GENIE_JOIN_SPECS:-}" && "${GENIE_JOIN_SPECS}" != "[]" ]]; then
+    if echo "$response_body" | grep -q 'Failed to parse export proto'; then
+      echo "Join specs were rejected by the Genie API. Retrying update without join_specs..."
+      patch_body=$(build_patch_body 1)
+      echo "$patch_body" > "$tmpfile"
+      response=$(curl -s -w "\n%{http_code}" -X PATCH \
+        -H "${UA_HEADER}" \
+        -H "Authorization: Bearer ${token}" \
+        -H "Content-Type: application/json" \
+        -d @"${tmpfile}" \
+        "${workspace_url}/api/2.0/genie/spaces/${space_id}")
+      http_code=$(echo "$response" | tail -n1)
+      response_body=$(echo "$response" | sed '$d')
+      if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
+        echo "Genie Space ${space_id} config updated successfully without join_specs."
+        echo "WARNING: join_specs were skipped because the Genie API rejected them."
+        rm -f "$tmpfile"
+        return 0
+      fi
     fi
   fi
 
-  echo "Setting ACLs for groups..."
-  set_genie_acls "$workspace_url" "$token" "$space_id"
-  echo "Done. Genie Space ID: ${space_id}"
+  rm -f "$tmpfile"
+
+  if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
+    echo "Genie Space ${space_id} config updated successfully."
+  else
+    echo "Failed to update Genie Space config (HTTP ${http_code})."
+    echo "API response: ${response_body}"
+    exit 1
+  fi
 }
 
 # ---------- Trash (delete) a Genie Space ----------
@@ -549,19 +605,26 @@ if [[ "$COMMAND" == "create" ]]; then
     exit 1
   fi
 
-  # Require groups for create
-  if [[ -z "${GENIE_GROUPS_CSV:-}" ]]; then
-    echo "ERROR: GENIE_GROUPS_CSV not set. Pass comma-separated group names." >&2
-    echo "  Example: GENIE_GROUPS_CSV='Analyst,Admin' $0 create" >&2
-    exit 1
-  fi
-
   create_genie_space "$WORKSPACE_URL" "$TOKEN" "$TITLE" "$WAREHOUSE_ID"
+
+elif [[ "$COMMAND" == "update-config" ]]; then
+  update_genie_config
 
 elif [[ "$COMMAND" == "set-acls" ]]; then
   WORKSPACE_URL="${1:-${DATABRICKS_HOST}}"
   EXPLICIT_TOKEN="${2:-}"
   SPACE_ID="${3:-${GENIE_SPACE_OBJECT_ID:-}}"
+
+  # Try reading space ID from file if not provided directly
+  if [[ -z "$SPACE_ID" && -n "${GENIE_ID_FILE:-}" ]]; then
+    if [[ ! -f "${GENIE_ID_FILE}" ]]; then
+      echo "ERROR: Genie Space ID file not found at '${GENIE_ID_FILE}'." >&2
+      echo "  The space may have been deleted outside Terraform." >&2
+      echo "  To recover: terraform taint 'null_resource.genie_space_create[0]'" >&2
+      exit 1
+    fi
+    SPACE_ID=$(cat "${GENIE_ID_FILE}" | tr -d '[:space:]')
+  fi
 
   if [[ -z "$WORKSPACE_URL" ]]; then
     echo "Need workspace URL. Set DATABRICKS_HOST or pass as first argument."
@@ -571,11 +634,10 @@ elif [[ "$COMMAND" == "set-acls" ]]; then
   TOKEN=$(resolve_token "$WORKSPACE_URL" "$EXPLICIT_TOKEN") || exit 1
 
   if [[ -z "$SPACE_ID" ]]; then
-    echo "Genie Space ID required. Set GENIE_SPACE_OBJECT_ID or pass as third argument."
+    echo "Genie Space ID required. Set GENIE_SPACE_OBJECT_ID, GENIE_ID_FILE, or pass as third argument."
     exit 1
   fi
 
-  # Require groups for set-acls
   if [[ -z "${GENIE_GROUPS_CSV:-}" ]]; then
     echo "ERROR: GENIE_GROUPS_CSV not set. Pass comma-separated group names." >&2
     echo "  Example: GENIE_GROUPS_CSV='Analyst,Admin' $0 set-acls" >&2

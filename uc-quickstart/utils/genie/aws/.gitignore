@@ -1,7 +1,18 @@
 # Local import IDs (copy from import_ids.env.example)
 import_ids.env
 
+# Legacy helper links inside env workspaces
+envs/*/*.tf
+envs/*/*.py
+envs/*/ABAC_PROMPT.md
+envs/*/scripts
+envs/*/.terraform.lock.hcl
+envs/*/data_access/auth.auto.tfvars
+envs/*/data_access/env.auto.tfvars
+envs/*/data_access/.terraform.lock.hcl
+
 # Terraform state (may contain secrets)
+# Applies to nested env directories too (for example envs/dev/.terraform/).
 *.tfstate
 *.tfstate.backup
 .terraform/
@@ -9,10 +20,10 @@ import_ids.env
 # User-specific credentials (only track the .example)
 auth.auto.tfvars
 
-# Auto-fetched DDLs (user-specific)
+# Auto-fetched DDLs in workspace envs (user-specific)
 ddl/_fetched.sql
 
-# AI-generated output (user-specific)
+# AI-generated output in workspace envs (user-specific)
 generated/
 masking_functions.sql
 

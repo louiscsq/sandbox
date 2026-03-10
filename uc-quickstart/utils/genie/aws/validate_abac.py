@@ -311,6 +311,82 @@ def _find_tfvars_file(tfvars_path: Path, name: str) -> Path | None:
     return None
 
 
+def _find_account_abac_file(tfvars_path: Path) -> Path | None:
+    """Locate envs/account/abac.auto.tfvars relative to the given tfvars file."""
+    # Walk up until we find an 'envs' directory, then look for envs/account/
+    p = tfvars_path.parent
+    for _ in range(5):
+        candidate = p / "account" / "abac.auto.tfvars"
+        if candidate.exists() and candidate != tfvars_path:
+            return candidate
+        if (p / "account").is_dir():
+            return None
+        p = p.parent
+    return None
+
+
+def load_validation_context(cfg: dict, result: ValidationResult, tfvars_path: Path) -> dict:
+    """Merge supplemental validation context for split-state workspace configs."""
+    merged = dict(cfg)
+    parent_name = tfvars_path.parent.name
+    is_generated = parent_name == "generated"
+    if is_generated or parent_name == "data_access":
+        env_name = tfvars_path.parent.parent.name
+    else:
+        env_name = parent_name
+
+    env_cfg = {}
+    env_path = _find_tfvars_file(tfvars_path, "env.auto.tfvars")
+    if env_path:
+        try:
+            env_cfg = parse_tfvars(env_path)
+        except Exception as e:
+            result.warn(f"Could not parse {env_path}: {e}")
+
+    if (
+        not is_generated
+        and parent_name != "data_access"
+        and env_name != "account"
+        and env_cfg.get("manage_groups", False) is False
+    ):
+        if cfg.get("tag_policies"):
+            result.error(
+                "workspace split-state config should not define 'tag_policies' — "
+                "tag policies are account-scoped and belong in envs/account/abac.auto.tfvars"
+            )
+        if cfg.get("tag_assignments"):
+            result.error(
+                "workspace split-state config should not define 'tag_assignments' — "
+                "shared governance belongs in envs/<env>/data_access/abac.auto.tfvars"
+            )
+        if cfg.get("fgac_policies"):
+            result.error(
+                "workspace split-state config should not define 'fgac_policies' — "
+                "shared governance belongs in envs/<env>/data_access/abac.auto.tfvars"
+            )
+        if cfg.get("group_members"):
+            result.error(
+                "workspace lookup-only config should not define 'group_members' — "
+                "membership belongs in the shared account config"
+            )
+
+    # Supplement tag_policies from envs/account/ when not present in current file.
+    # Tag policies are account-scoped and managed in the account layer, so data_access
+    # and workspace configs won't have them directly.
+    if not merged.get("tag_policies"):
+        account_abac = _find_account_abac_file(tfvars_path)
+        if account_abac:
+            try:
+                account_cfg = parse_tfvars(account_abac)
+                if account_cfg.get("tag_policies"):
+                    merged["tag_policies"] = account_cfg["tag_policies"]
+                    result.ok(f"tag_policies loaded from {account_abac}")
+            except Exception as e:
+                result.warn(f"Could not parse {account_abac}: {e}")
+
+    return merged
+
+
 def validate_auth(cfg: dict, result: ValidationResult, tfvars_path: Path):
     required = [
         "databricks_account_id",
@@ -350,8 +426,8 @@ def main():
     parser.add_argument("sql", nargs="?", help="Path to masking_functions.sql (optional)")
     args = parser.parse_args()
 
-    tfvars_path = Path(args.tfvars)
-    sql_path = Path(args.sql) if args.sql else None
+    tfvars_path = Path(args.tfvars).resolve()
+    sql_path = Path(args.sql).resolve() if args.sql else None
 
     if not tfvars_path.exists():
         print(f"ERROR: {tfvars_path} not found")
@@ -382,13 +458,15 @@ def main():
             else:
                 result.ok(f"SQL file: {len(sql_functions)} function(s) found — {sorted(sql_functions)}")
 
+    merged_cfg = load_validation_context(cfg, result, tfvars_path)
+
     # --- Run validations ---
     validate_auth(cfg, result, tfvars_path)
-    group_names = validate_groups(cfg, result)
-    tag_map = validate_tag_policies(cfg, result)
-    validate_tag_assignments(cfg, tag_map, result)
-    validate_fgac_policies(cfg, group_names, tag_map, sql_functions, result)
-    validate_group_members(cfg, group_names, result)
+    group_names = validate_groups(merged_cfg, result)
+    tag_map = validate_tag_policies(merged_cfg, result)
+    validate_tag_assignments(merged_cfg, tag_map, result)
+    validate_fgac_policies(merged_cfg, group_names, tag_map, sql_functions, result)
+    validate_group_members(merged_cfg, group_names, result)
 
     result.print_report()
     sys.exit(0 if result.passed else 1)

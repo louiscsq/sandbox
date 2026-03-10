@@ -8,8 +8,8 @@ the generated output files.  Optionally runs validate_abac.py on the result.
 
 Authentication:
   The script reads auth.auto.tfvars for Databricks credentials and
-  env.auto.tfvars for uc_tables and environment config.  Catalog/schema
-  for UDF deployment are auto-derived from the first table in uc_tables
+  env.auto.tfvars for uc_catalog + uc_tables and environment config.  Catalog/schema
+  for UDF deployment are auto-derived from uc_catalog (or the first table in uc_tables)
   (override with --catalog / --schema).
 
 Supported LLM providers:
@@ -22,9 +22,10 @@ Usage:
   cp auth.auto.tfvars.example auth.auto.tfvars   # credentials (gitignored)
   cp env.auto.tfvars.example env.auto.tfvars     # tables + environment (checked in)
   # Edit env.auto.tfvars:
-  #   uc_tables = ["prod.sales.customers", "prod.sales.orders", "prod.finance.*"]
+  #   uc_catalog = "prod_catalog"
+  #   uc_tables  = ["sales.customers", "sales.orders", "finance.*"]
 
-  # Generate (reads tables from uc_tables; catalog/schema auto-derived)
+  # Generate (reads uc_catalog + uc_tables from env config; catalog/schema auto-derived)
   python generate_abac.py
 
   # Or override tables via CLI
@@ -52,9 +53,10 @@ PRODUCT_NAME = "genierails"
 PRODUCT_VERSION = "0.1.0"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+WORK_DIR = Path.cwd()
 PROMPT_TEMPLATE_PATH = SCRIPT_DIR / "ABAC_PROMPT.md"
-DEFAULT_AUTH_FILE = SCRIPT_DIR / "auth.auto.tfvars"
-DEFAULT_ENV_FILE = SCRIPT_DIR / "env.auto.tfvars"
+DEFAULT_AUTH_FILE = WORK_DIR / "auth.auto.tfvars"
+DEFAULT_ENV_FILE = WORK_DIR / "env.auto.tfvars"
 
 REQUIRED_PACKAGES = {
     "python-hcl2": "hcl2",
@@ -105,12 +107,27 @@ def _load_tfvars(path: Path, label: str) -> dict:
 
 
 def load_auth_config(auth_file: Path, env_file: Path | None = None) -> dict:
-    """Load config from auth + env tfvars files. Merges both; env overrides auth."""
+    """Load config from auth + env tfvars files. Merges both; env overrides auth.
+
+    Supports the new split format (uc_catalog + schema-relative uc_tables) as well as
+    the legacy full-ref format (uc_tables = ["catalog.schema.table"]).  When uc_catalog
+    is set, relative uc_tables entries are expanded into full 3-part refs before being
+    returned so the rest of the script does not need to know about the split.
+    """
     cfg = _load_tfvars(auth_file, "credentials")
     if env_file is None:
         env_file = auth_file.parent / "env.auto.tfvars"
     env_cfg = _load_tfvars(env_file, "environment")
     cfg.update(env_cfg)
+
+    # Combine uc_catalog + relative uc_tables into full 3-part refs when the new
+    # split format is used.  The --tables CLI flag always passes full refs directly
+    # and bypasses this function, so only config-file values need expansion here.
+    uc_catalog = cfg.get("uc_catalog", "")
+    uc_tables = cfg.get("uc_tables", [])
+    if uc_catalog and uc_tables:
+        cfg["uc_tables"] = [f"{uc_catalog}.{t}" for t in uc_tables]
+
     if "uc_tables" in cfg and cfg["uc_tables"]:
         print(f"    uc_tables: {', '.join(cfg['uc_tables'])}")
     return cfg
@@ -234,8 +251,9 @@ def fetch_tables_from_databricks(
 
 
 def build_prompt(ddl_text: str,
-                 catalog_schemas: list[tuple[str, str]] | None = None) -> str:
-    """Build the full prompt by injecting DDL into the template."""
+                 catalog_schemas: list[tuple[str, str]] | None = None,
+                 group_names: list[str] | None = None) -> str:
+    """Build the full prompt by injecting DDL and optional group names into the template."""
     template = PROMPT_TEMPLATE_PATH.read_text()
 
     section_marker = "### MY TABLES"
@@ -251,14 +269,26 @@ def build_prompt(ddl_text: str,
             "to match the catalog.schema of the tables the policy applies to.\n"
         )
 
+    groups_lines = ""
+    if group_names:
+        groups_lines = (
+            "\n### REQUIRED GROUP NAMES\n\n"
+            "Use EXACTLY these group names in the generated config (groups, "
+            "fgac_policies to_principals, genie ACLs). Do NOT invent new names.\n\n"
+        )
+        for g in group_names:
+            groups_lines += f"  - {g}\n"
+        groups_lines += "\n"
+
     if idx == -1:
         print("WARNING: Could not find '### MY TABLES' in ABAC_PROMPT.md")
         print("  Appending DDL at the end of the prompt instead.\n")
-        prompt = template + f"\n\n{cs_lines}\n\n{ddl_text}\n"
+        prompt = template + f"\n\n{groups_lines}{cs_lines}\n\n{ddl_text}\n"
     else:
         prompt_body = template[:idx].rstrip()
         user_input = (
-            f"\n\n### MY TABLES\n\n"
+            f"\n\n{groups_lines}"
+            f"### MY TABLES\n\n"
             f"{cs_lines}\n"
             f"```sql\n{ddl_text}\n```\n"
         )
@@ -645,8 +675,9 @@ def autofix_tag_policies(tfvars_path: Path) -> int:
 def run_validation(out_dir: Path) -> bool:
     """Run validate_abac.py on the generated files. Returns True if passed."""
     validator = SCRIPT_DIR / "validate_abac.py"
-    tfvars_path = out_dir / "abac.auto.tfvars"
-    sql_path = out_dir / "masking_functions.sql"
+    resolved_out_dir = out_dir.resolve()
+    tfvars_path = resolved_out_dir / "abac.auto.tfvars"
+    sql_path = resolved_out_dir / "masking_functions.sql"
 
     if not validator.exists():
         print("\n  [SKIP] validate_abac.py not found — skipping validation")
@@ -657,7 +688,7 @@ def run_validation(out_dir: Path) -> bool:
         cmd.append(str(sql_path))
 
     print("\n  Running validation...\n")
-    result = subprocess.run(cmd, cwd=str(SCRIPT_DIR))
+    result = subprocess.run(cmd, cwd=str(WORK_DIR))
     return result.returncode == 0
 
 
@@ -668,7 +699,7 @@ def main():
             "Examples:\n"
             "  python generate_abac.py                       # reads uc_tables from env.auto.tfvars\n"
             "  python generate_abac.py --tables 'prod.sales.*'  # CLI override\n"
-            "  python generate_abac.py --promote              # generate + validate + copy to root (legacy)\n"
+            "  python generate_abac.py --promote              # generate + validate + split into account + env data_access + workspace\n"
             "  python generate_abac.py --dry-run              # print prompt without calling LLM\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -695,19 +726,25 @@ def main():
     parser.add_argument("--model", help="Model name (defaults depend on provider)")
     parser.add_argument(
         "--ddl-dir",
-        default=str(SCRIPT_DIR / "ddl"),
+        default="ddl",
         help="Directory containing .sql DDL files (default: ./ddl/)",
     )
     parser.add_argument(
         "--out-dir",
-        default=str(SCRIPT_DIR / "generated"),
+        default="generated",
         help="Output directory for generated files (default: ./generated/)",
     )
     parser.add_argument("--max-retries", type=int, default=3, help="Max LLM call attempts with exponential backoff (default: 3)")
     parser.add_argument("--skip-validation", action="store_true", help="Skip running validate_abac.py")
     parser.add_argument("--promote", action="store_true",
-        help="Auto-copy generated files to module root after validation passes")
+        help="Auto-split validated output into account + env data_access + workspace configs")
     parser.add_argument("--dry-run", action="store_true", help="Build the prompt and print it without calling the LLM")
+    parser.add_argument(
+        "--groups",
+        help="Comma-separated group names to use in generated config. "
+             "When set, the LLM uses these exact names instead of inventing new ones. "
+             "Useful for IDP-synced groups (e.g. --groups 'Finance_Analyst,Clinical_Staff').",
+    )
 
     args = parser.parse_args()
 
@@ -784,9 +821,15 @@ def main():
 
         ddl_text = load_ddl_files(ddl_dir)
 
+    group_names = None
+    if args.groups:
+        group_names = [g.strip() for g in args.groups.split(",") if g.strip()]
+        print(f"  Groups:   {', '.join(group_names)} (from --groups CLI)")
+
     prompt = build_prompt(
         ddl_text,
         catalog_schemas=catalog_schemas,
+        group_names=group_names,
     )
 
     if args.dry_run:
@@ -857,7 +900,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
    ```bash
    make validate-generated
    ```
-3. When ready, apply (validates again, promotes to root, runs terraform):
+3. When ready, apply (validates again, promotes shared account + workspace config, then runs terraform):
    ```bash
    make apply
    ```
@@ -896,7 +939,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
             "# - groups (business roles)\n"
             "# - tag_assignments (what data is considered sensitive)\n"
             "# - fgac_policies (who sees what, and how)\n"
-            "# Then validate before copying to root:\n"
+            "# Then validate before promoting into shared account + workspace config:\n"
             "#   python validate_abac.py generated/abac.auto.tfvars generated/masking_functions.sql\n"
             "# ============================================================================\n\n"
         )
@@ -917,14 +960,29 @@ Before you apply, tune for your business roles, security requirements, and Genie
             sys.exit(1)
 
         if args.promote and passed:
-            promoted = []
-            for fname in ["abac.auto.tfvars", "masking_functions.sql"]:
-                src = out_dir / fname
-                if src.exists():
-                    shutil.copy2(src, SCRIPT_DIR / fname)
-                    promoted.append(fname)
-            if promoted:
-                print(f"\n  Promoted to module root: {', '.join(promoted)}")
+            if WORK_DIR.name in {"account", "data_access"}:
+                print("\n  [SKIP] --promote requires a workspace env directory (e.g. envs/dev).")
+            else:
+                split_script = SCRIPT_DIR / "scripts" / "split_abac_config.py"
+                account_path = WORK_DIR.parent / "account" / "abac.auto.tfvars"
+                data_access_dir = WORK_DIR / "data_access"
+                data_access_dir.mkdir(parents=True, exist_ok=True)
+                workspace_path = WORK_DIR / "abac.auto.tfvars"
+                subprocess.check_call(
+                    [
+                        sys.executable,
+                        str(split_script),
+                        str(tfvars_path),
+                        str(account_path),
+                        str(data_access_dir / "abac.auto.tfvars"),
+                        str(workspace_path),
+                    ]
+                )
+                if sql_block:
+                    shutil.copy2(sql_path, data_access_dir / "masking_functions.sql")
+                print(
+                    "\n  Promoted into shared account + env-scoped data_access + workspace configs."
+                )
     elif not args.skip_validation and (not sql_block or not hcl_block):
         print("\n  [SKIP] Validation skipped — could not extract both code blocks.")
         print(f"  Review {response_path} and manually extract the files.")
@@ -933,17 +991,21 @@ Before you apply, tune for your business roles, security requirements, and Genie
     print("  Done!")
     if sql_block and hcl_block:
         if args.promote:
-            print("  Files promoted to root. Next step:")
-            print("    make apply   (or: terraform init && terraform apply -parallelism=1)")
+            env_name = Path.cwd().name
+            env_suffix = f" ENV={env_name}" if env_name != "dev" else ""
+            print("  Files promoted into the current env workspace. Next step:")
+            print(f"    make apply{env_suffix}   (or: terraform init && terraform apply -parallelism=1)")
         else:
+            env_name = Path.cwd().name
+            env_suffix = f" ENV={env_name}" if env_name != "dev" else ""
             print("  Next steps:")
             print(f"    1. Review the tuning checklist:")
             print(f"       {out_dir.resolve()}/TUNING.md")
             print(f"    2. Review and tune generated files:")
             print(f"       {out_dir.resolve()}/masking_functions.sql")
             print(f"       {out_dir.resolve()}/abac.auto.tfvars")
-            print("    3. make validate-generated   (check your changes anytime)")
-            print("    4. make apply   (validates, promotes to root, runs terraform apply)")
+            print(f"    3. make validate-generated{env_suffix}   (check your changes anytime)")
+            print(f"    4. make apply{env_suffix}   (validates, splits shared account/workspace config, runs terraform apply)")
     print("=" * 60)
 
 

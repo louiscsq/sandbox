@@ -190,3 +190,4 @@ coverage.txt
 **/*.tfstate.*
 **/terraform.tfstate.d/**
 **/*.tfvars
+uc-quickstart/utils/genie/aws/envs/**/main.tf

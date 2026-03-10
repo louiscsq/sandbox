@@ -13,20 +13,21 @@ import os
 import sys
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = SCRIPT_DIR.parent
+WORK_DIR = Path.cwd()
 
 
 def _load_auth():
     """Read auth.auto.tfvars and set SDK env vars."""
-    auth_path = PROJECT_DIR / "auth.auto.tfvars"
+    auth_path = WORK_DIR / "auth.auto.tfvars"
     if not auth_path.exists():
         return
     try:
         import hcl2
     except ImportError:
         import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "python-hcl2"])
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--quiet", "python-hcl2"],
+        )
         import hcl2
 
     with open(auth_path) as f:
@@ -44,7 +45,9 @@ def _load_auth():
 
 
 def main():
-    tfvars_path = Path(sys.argv[1]) if len(sys.argv) > 1 else PROJECT_DIR / "abac.auto.tfvars"
+    tfvars_path = (
+        Path(sys.argv[1]) if len(sys.argv) > 1 else WORK_DIR / "abac.auto.tfvars"
+    )
     if not tfvars_path.exists():
         print(f"  [SKIP] {tfvars_path} not found")
         return
@@ -89,7 +92,11 @@ def main():
             values=[Value(name=v) for v in all_values],
         )
         try:
-            w.tag_policies.update_tag_policy(tag_key=key, tag_policy=policy, update_mask="values")
+            w.tag_policies.update_tag_policy(
+                tag_key=key,
+                tag_policy=policy,
+                update_mask="values",
+            )
             changes = []
             if missing:
                 changes.append(f"added {sorted(missing)}")

@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -40,13 +41,25 @@ def _ensure_packages():
     except (ImportError, ModuleNotFoundError):
         print("  Upgrading databricks-sdk (need databricks.sdk.useragent)...")
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "databricks-sdk"],
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--quiet",
+                "--upgrade",
+                "databricks-sdk",
+            ],
         )
 
 
 _ensure_packages()
 
 from databricks.sdk import WorkspaceClient  # noqa: E402
+from databricks.sdk.service.catalog import (  # noqa: E402
+    PermissionsChange,
+    Privilege,
+)
 from databricks.sdk.service.sql import (  # noqa: E402
     StatementState,
 )
@@ -62,8 +75,10 @@ def parse_sql_blocks(sql_text: str) -> list:
     blocks = []
 
     for raw_stmt in re.split(r";\s*(?:--[^\n]*)?\n", sql_text):
-        lines = [l for l in raw_stmt.split("\n")
-                 if l.strip() and not l.strip().startswith("--")]
+        lines = [
+            line for line in raw_stmt.split("\n")
+            if line.strip() and not line.strip().startswith("--")
+        ]
         stmt = "\n".join(lines).strip()
         if not stmt:
             continue
@@ -90,6 +105,108 @@ def extract_function_name(stmt: str) -> str:
         r"FUNCTION\s+(\S+)\s*\(", stmt, re.IGNORECASE
     )
     return m.group(1) if m else "<unknown>"
+
+
+def _get_existing_privileges(
+    w: WorkspaceClient, securable_type: str, full_name: str, principal: str
+) -> set[Privilege]:
+    try:
+        resp = w.grants.get(
+            securable_type=securable_type,
+            full_name=full_name,
+            principal=principal,
+        )
+    except Exception:
+        return set()
+
+    for assignment in resp.privilege_assignments or []:
+        if assignment.principal == principal:
+            return set(assignment.privileges or [])
+
+    return set()
+
+
+def _ensure_drop_permissions(
+    w: WorkspaceClient, blocks: list[tuple[str, str, str]]
+) -> list[tuple[str, str, list[Privilege]]]:
+    principal = os.environ.get("DATABRICKS_CLIENT_ID", "").strip()
+    if not principal:
+        return []
+
+    grants_added: list[tuple[str, str, list[Privilege]]] = []
+    catalogs = sorted({catalog for catalog, _, _ in blocks if catalog})
+    schemas = sorted(
+        {
+            (catalog, schema)
+            for catalog, schema, _ in blocks
+            if catalog and schema
+        }
+    )
+
+    for catalog in catalogs:
+        existing = _get_existing_privileges(w, "CATALOG", catalog, principal)
+        missing = (
+            [Privilege.USE_CATALOG]
+            if Privilege.USE_CATALOG not in existing
+            else []
+        )
+        if not missing:
+            continue
+        print(
+            f"  Ensuring SP access on catalog {catalog} "
+            f"({', '.join(p.value for p in missing)})..."
+        )
+        w.grants.update(
+            securable_type="CATALOG",
+            full_name=catalog,
+            changes=[PermissionsChange(principal=principal, add=missing)],
+        )
+        grants_added.append(("CATALOG", catalog, missing))
+
+    for catalog, schema in schemas:
+        full_name = f"{catalog}.{schema}"
+        existing = _get_existing_privileges(w, "SCHEMA", full_name, principal)
+        missing = (
+            [Privilege.USE_SCHEMA]
+            if Privilege.USE_SCHEMA not in existing
+            else []
+        )
+        if not missing:
+            continue
+        print(
+            f"  Ensuring SP access on schema {full_name} "
+            f"({', '.join(p.value for p in missing)})..."
+        )
+        w.grants.update(
+            securable_type="SCHEMA",
+            full_name=full_name,
+            changes=[PermissionsChange(principal=principal, add=missing)],
+        )
+        grants_added.append(("SCHEMA", full_name, missing))
+
+    return grants_added
+
+
+def _cleanup_drop_permissions(
+    w: WorkspaceClient, grants_added: list[tuple[str, str, list[Privilege]]]
+) -> None:
+    for securable_type, full_name, privileges in reversed(grants_added):
+        try:
+            w.grants.update(
+                securable_type=securable_type,
+                full_name=full_name,
+                changes=[
+                    PermissionsChange(
+                        principal=os.environ["DATABRICKS_CLIENT_ID"],
+                        remove=privileges,
+                    )
+                ],
+            )
+        except Exception as exc:
+            print(
+                f"  WARNING: failed to remove temporary {securable_type.lower()} "
+                f"grants on {full_name}: {exc}"
+            )
 
 
 def deploy(sql_file: str, warehouse_id: str) -> None:
@@ -154,39 +271,49 @@ def drop(sql_file: str, warehouse_id: str) -> None:
         print("  No functions found in SQL file — nothing to drop.")
         return
 
+    grants_added = _ensure_drop_permissions(w, blocks)
     total = len(blocks)
     print(f"  Dropping {total} function(s) via Statement Execution API...")
 
     failed = 0
-    for i, (catalog, schema, stmt) in enumerate(blocks, 1):
-        func_name = extract_function_name(stmt)
-        fqn = f"{catalog}.{schema}.{func_name}" if catalog and schema else func_name
-        target = f"{catalog}.{schema}" if catalog and schema else "<default>"
-        print(f"  [{i}/{total}] DROP {target}.{func_name} ...", end=" ", flush=True)
-
-        drop_stmt = f"DROP FUNCTION IF EXISTS {fqn}"
-        try:
-            resp = w.statement_execution.execute_statement(
-                warehouse_id=warehouse_id,
-                statement=drop_stmt,
-                catalog=catalog,
-                schema=schema,
-                wait_timeout="30s",
+    try:
+        for i, (catalog, schema, stmt) in enumerate(blocks, 1):
+            func_name = extract_function_name(stmt)
+            fqn = (
+                f"{catalog}.{schema}.{func_name}"
+                if catalog and schema
+                else func_name
             )
-        except Exception as e:
-            print(f"ERROR: {e}")
-            failed += 1
-            continue
+            target = (
+                f"{catalog}.{schema}" if catalog and schema else "<default>"
+            )
+            print(f"  [{i}/{total}] DROP {target}.{func_name} ...", end=" ", flush=True)
 
-        state = resp.status.state
-        if state == StatementState.SUCCEEDED:
-            print("OK")
-        else:
-            error_msg = ""
-            if resp.status.error:
-                error_msg = resp.status.error.message or str(resp.status.error)
-            print(f"FAILED ({state.value}): {error_msg}")
-            failed += 1
+            drop_stmt = f"DROP FUNCTION IF EXISTS {fqn}"
+            try:
+                resp = w.statement_execution.execute_statement(
+                    warehouse_id=warehouse_id,
+                    statement=drop_stmt,
+                    catalog=catalog,
+                    schema=schema,
+                    wait_timeout="30s",
+                )
+            except Exception as e:
+                print(f"ERROR: {e}")
+                failed += 1
+                continue
+
+            state = resp.status.state
+            if state == StatementState.SUCCEEDED:
+                print("OK")
+            else:
+                error_msg = ""
+                if resp.status.error:
+                    error_msg = resp.status.error.message or str(resp.status.error)
+                print(f"FAILED ({state.value}): {error_msg}")
+                failed += 1
+    finally:
+        _cleanup_drop_permissions(w, grants_added)
 
     print()
     if failed:
@@ -214,7 +341,10 @@ def main():
     parser.add_argument(
         "--drop",
         action="store_true",
-        help="Drop functions instead of creating them (used during terraform destroy)",
+        help=(
+            "Drop functions instead of creating them "
+            "(used during terraform destroy)"
+        ),
     )
     args = parser.parse_args()
 

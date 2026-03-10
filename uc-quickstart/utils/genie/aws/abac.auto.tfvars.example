@@ -1,15 +1,22 @@
 # ============================================================================
-# ABAC Terraform Module — Variable Skeleton (ABAC + Genie config)
+# GENERATED DRAFT ABAC CONFIG — source for promote
 # ============================================================================
-# This file contains the ABAC configuration (groups, tags, policies)
-# and Genie Space config (title, description, questions, instructions,
-# benchmarks). Credentials go in auth.auto.tfvars; environment in env.auto.tfvars.
+# `make generate` writes a full draft into `envs/<env>/generated/abac.auto.tfvars`.
+# `make promote` then splits that draft into:
+#   - `envs/account/abac.auto.tfvars`
+#       groups + optional group_members
+#   - `envs/<env>/data_access/abac.auto.tfvars`
+#       env-scoped groups lookup + tag_policies + tag_assignments + fgac_policies
+#   - `envs/<env>/data_access/masking_functions.sql`
+#       env-scoped masking SQL deployed by the governance layer
+#   - `envs/<env>/abac.auto.tfvars`
+#       groups lookup + Genie config only
 #
 # Setup:
 #   1. cp auth.auto.tfvars.example auth.auto.tfvars   (credentials — gitignored)
 #      cp env.auto.tfvars.example env.auto.tfvars     (tables + environment)
-#   2. cp abac.auto.tfvars.example abac.auto.tfvars    (fill in ABAC config)
-#   3. terraform apply   (loads both files automatically)
+#   2. Generate a draft with `make generate`
+#   3. Tune the draft, then run `make promote` and `make apply`
 #
 # For a complete working example see examples/finance/finance.tfvars.example.
 # ============================================================================
@@ -68,13 +75,7 @@ fgac_policies = [
   # }
 ]
 
-# === Group members (optional): account-level user IDs to add to groups ===
-# Get IDs from Account Console > Users or SCIM API.
-group_members = {
-  # "GroupName" = ["user_id_1", "user_id_2"]
-}
-
-# === Genie Space Config (AI-generated — tune as needed) ===
+# === Genie Space Config (workspace-owned after promote) ===
 # Title and description for the auto-created Genie Space.
 # genie_space_title       = "Financial & Clinical Analytics"
 # genie_space_description = "Explore transaction data, patient encounters, and compliance metrics with natural language."
