@@ -356,7 +356,8 @@ update_genie_config() {
 
   build_patch_body() {
     local skip_join_specs="${1:-0}"
-    GENIE_SKIP_JOIN_SPECS="$skip_join_specs" python3 << PYEOF
+    local skip_title="${2:-0}"
+    GENIE_SKIP_JOIN_SPECS="$skip_join_specs" GENIE_SKIP_TITLE="$skip_title" python3 << PYEOF
 import json, random, datetime, os
 
 def gen_id():
@@ -462,11 +463,12 @@ if instructions:
 warehouse_id = os.environ.get("GENIE_WAREHOUSE_ID", "")
 title = os.environ.get("GENIE_TITLE", "")
 desc = os.environ.get("GENIE_DESCRIPTION", "")
+skip_title = os.environ.get("GENIE_SKIP_TITLE", "0") == "1"
 
 body = {"serialized_space": json.dumps(space, separators=(',', ':'))}
 if warehouse_id:
     body["warehouse_id"] = warehouse_id
-if title:
+if title and not skip_title:
     body["title"] = title
 if desc:
     body["description"] = desc
@@ -513,6 +515,31 @@ PYEOF
       if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
         echo "Genie Space ${space_id} config updated successfully without join_specs."
         echo "WARNING: join_specs were skipped because the Genie API rejected them."
+        rm -f "$tmpfile"
+        return 0
+      fi
+    fi
+  fi
+
+  # Retry without the title field if the Genie API rejects it because a title
+  # node already exists in the space (title was set during create; PATCH must
+  # not include it again or the API returns RESOURCE_ALREADY_EXISTS).
+  if [[ "$http_code" != "200" && "$http_code" != "201" ]]; then
+    if echo "$response_body" | grep -q 'RESOURCE_ALREADY_EXISTS' && \
+       echo "$response_body" | grep -q 'Node named'; then
+      echo "Genie API: title node already exists in space (set during create). Retrying without title..."
+      patch_body=$(build_patch_body 0 1)
+      echo "$patch_body" > "$tmpfile"
+      response=$(curl -s -w "\n%{http_code}" -X PATCH \
+        -H "${UA_HEADER}" \
+        -H "Authorization: Bearer ${token}" \
+        -H "Content-Type: application/json" \
+        -d @"${tmpfile}" \
+        "${workspace_url}/api/2.0/genie/spaces/${space_id}")
+      http_code=$(echo "$response" | tail -n1)
+      response_body=$(echo "$response" | sed '$d')
+      if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
+        echo "Genie Space ${space_id} config updated successfully (title was already set)."
         rm -f "$tmpfile"
         return 0
       fi
