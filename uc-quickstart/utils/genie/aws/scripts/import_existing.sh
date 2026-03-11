@@ -150,16 +150,42 @@ except ImportError:
 " 2>/dev/null || true
 }
 
+# Only outputs tag keys that EXIST in the Databricks account, to avoid
+# "Cannot import non-existent remote object" noise for freshly-destroyed policies.
 extract_tag_keys() {
   python3 -c "
 import hcl2, sys
 with open('abac.auto.tfvars') as f:
     cfg = hcl2.load(f)
-for tp in cfg.get('tag_policies', []):
-    print(tp.get('key', ''))
-" 2>/dev/null || {
-    echo "WARNING: Could not parse abac.auto.tfvars with python-hcl2." >&2
-  }
+desired = set(tp.get('key', '') for tp in cfg.get('tag_policies', []))
+if not desired:
+    sys.exit(0)
+try:
+    with open('auth.auto.tfvars') as f:
+        auth = hcl2.load(f)
+    account_id    = auth.get('databricks_account_id',    [''])[0]
+    client_id     = auth.get('databricks_client_id',     [''])[0]
+    client_secret = auth.get('databricks_client_secret', [''])[0]
+    from databricks.sdk import AccountClient
+    a = AccountClient(
+        host='https://accounts.cloud.databricks.com',
+        account_id=account_id,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+    existing = set()
+    for tp in a.tag_policies.list():
+        key = getattr(tp, 'tag_key', None)
+        if key and key in desired:
+            existing.add(key)
+    for k in sorted(existing):
+        print(k)
+except Exception as e:
+    # Fall back: output all desired keys; import will fail gracefully if missing
+    sys.stderr.write(f'WARNING: tag_policies.list() failed ({e}), falling back\\n')
+    for k in sorted(desired):
+        print(k)
+" 2>/dev/null || true
 }
 
 # Outputs TAB-separated lines: tf_key<TAB>import_id
