@@ -162,6 +162,8 @@ for tp in cfg.get('tag_policies', []):
   }
 }
 
+# Outputs TAB-separated lines: tf_key<TAB>import_id
+# import_id format: entity_type,entity_name,tag_key  (commas — required by provider)
 extract_tag_assignments() {
   python3 -c "
 import hcl2, sys
@@ -170,22 +172,122 @@ with open('abac.auto.tfvars') as f:
 for ta in cfg.get('tag_assignments', []):
     etype = ta.get('entity_type', '')
     ename = ta.get('entity_name', '')
-    tkey = ta.get('tag_key', '')
-    tval = ta.get('tag_value', '')
+    tkey  = ta.get('tag_key', '')
+    tval  = ta.get('tag_value', '')
     if not (etype and ename and tkey and tval):
         continue
-    tf_key = f'{etype}|{ename}|{tkey}|{tval}'
-    # Import ID format for databricks_entity_tag_assignment: entity_type|entity_name|tag_key
-    import_id = f'{etype}|{ename}|{tkey}'
-    print(f'{tf_key}::{import_id}')
-" 2>/dev/null || {
-    echo "WARNING: Could not parse abac.auto.tfvars with python-hcl2." >&2
-  }
+    tf_key    = f'{etype}|{ename}|{tkey}|{tval}'
+    import_id = f'{etype},{ename},{tkey}'   # comma-separated as provider requires
+    print(tf_key + '\t' + import_id)
+" 2>/dev/null || true
 }
 
-# Extract catalog-group pairs and client_id for grant imports.
-# Outputs lines in the form: catalog_access|<catalog>|<group>|catalog/<catalog>/<group>
-# or:                         terraform_sp|<catalog>|<client_id>|catalog/<catalog>/<client_id>
+# Delete stale entity tag assignments (same entity+tag_key, possibly wrong tag_value)
+# via SQL UNSET TAGS so that Terraform can create fresh assignments without conflicts.
+cleanup_stale_tag_assignments() {
+  python3 - << 'PYEOF'
+import hcl2, os, sys
+
+def _str(v): return (v[0] if isinstance(v, list) else v or '').strip()
+
+# Load abac, auth, env configs
+cfg, auth, env_cfg = {}, {}, {}
+for fname in ['abac.auto.tfvars']:
+    if os.path.exists(fname):
+        try:
+            with open(fname) as f: cfg = hcl2.load(f)
+        except Exception: pass
+
+for fname in ['auth.auto.tfvars', '../auth.auto.tfvars']:
+    if os.path.exists(fname):
+        try:
+            with open(fname) as f: auth = hcl2.load(f)
+        except Exception: pass
+        break
+
+for fname in ['env.auto.tfvars', '../env.auto.tfvars']:
+    if os.path.exists(fname):
+        try:
+            with open(fname) as f: env_cfg = hcl2.load(f)
+        except Exception: pass
+        break
+
+tag_assignments = cfg.get('tag_assignments', [])
+if not tag_assignments:
+    sys.exit(0)
+
+host          = _str(auth.get('databricks_workspace_host', '')) or os.environ.get('DATABRICKS_HOST', '')
+client_id     = _str(auth.get('databricks_client_id', ''))     or os.environ.get('DATABRICKS_CLIENT_ID', '')
+client_secret = _str(auth.get('databricks_client_secret', '')) or os.environ.get('DATABRICKS_CLIENT_SECRET', '')
+warehouse_id  = _str(env_cfg.get('sql_warehouse_id', ''))
+
+if not warehouse_id:
+    try:
+        from databricks.sdk import WorkspaceClient
+        w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
+        for wh in w.warehouses.list():
+            if 'RUNNING' in str(wh.state) or 'STARTING' in str(wh.state):
+                warehouse_id = str(wh.id)
+                break
+    except Exception as e:
+        sys.stderr.write(f'WARNING: warehouse lookup failed: {e}\n')
+
+if not warehouse_id:
+    sys.stderr.write('WARNING: no warehouse_id; skipping tag assignment pre-cleanup\n')
+    sys.exit(0)
+
+try:
+    from databricks.sdk import WorkspaceClient
+    w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
+except Exception as e:
+    sys.stderr.write(f'WARNING: SDK init failed: {e}\n')
+    sys.exit(0)
+
+cleaned = 0
+for ta in tag_assignments:
+    etype = ta.get('entity_type', '')
+    ename = ta.get('entity_name', '')
+    tkey  = ta.get('tag_key', '')
+    if not (etype and ename and tkey):
+        continue
+
+    if etype == 'columns':
+        parts = ename.rsplit('.', 1)
+        if len(parts) != 2:
+            continue
+        table_fqn, col = parts
+        sql = f"ALTER TABLE {table_fqn} ALTER COLUMN {col} UNSET TAGS ('{tkey}')"
+    elif etype == 'tables':
+        sql = f"ALTER TABLE {ename} UNSET TAGS ('{tkey}')"
+    else:
+        continue
+
+    try:
+        resp = w.statement_execution.execute_statement(
+            statement=sql,
+            warehouse_id=warehouse_id,
+            wait_timeout='30s',
+            on_wait_timeout='CANCEL',
+        )
+        state = str(resp.status.state) if resp.status else ''
+        if 'SUCCEEDED' in state:
+            print(f'  Cleared tag {tkey} on {ename}')
+            cleaned += 1
+        elif 'FAILED' in state:
+            err = (resp.status.error.message if resp.status and resp.status.error else '') or ''
+            if not ('not found' in err.lower() or 'does not exist' in err.lower() or 'unset' in err.lower()):
+                sys.stderr.write(f'  WARNING: could not clear {tkey} on {ename}: {err}\n')
+    except Exception as e:
+        sys.stderr.write(f'  WARNING: SQL failed for {ename}/{tkey}: {e}\n')
+
+if cleaned:
+    print(f'  Cleared {cleaned} stale tag assignment(s).')
+PYEOF
+}
+
+# Outputs TAB-separated lines: grant_type<TAB>tf_key<TAB>import_id
+# grant_type is "catalog_access" or "terraform_sp"
+# tf_key may contain | (e.g. "dev_fin|Finance_Analyst") — use TAB IFS to parse correctly
 extract_grants() {
   python3 -c "
 import hcl2, sys, os
@@ -207,7 +309,7 @@ client_id = _str(auth.get('databricks_client_id', '')) or os.environ.get('DATABR
 try:
     with open('abac.auto.tfvars') as f:
         cfg = hcl2.load(f)
-    groups = list(cfg.get('groups', {}).keys())
+    groups          = list(cfg.get('groups', {}).keys())
     tag_assignments = cfg.get('tag_assignments', [])
     fgac_policies   = cfg.get('fgac_policies', [])
     uc_tables       = cfg.get('uc_tables', []) or []
@@ -215,7 +317,6 @@ except Exception as e:
     sys.stderr.write(f'WARNING: {e}\n')
     sys.exit(0)
 
-# Derive catalogs the same way the Terraform module does (from tag_assignments + fgac + uc_tables)
 catalogs = set()
 for ta in tag_assignments:
     ename = ta.get('entity_name', '')
@@ -229,14 +330,15 @@ for t in uc_tables:
     if t.count('.') >= 2:
         catalogs.add(t.split('.')[0])
 
+sep = '\t'
 for catalog in sorted(catalogs):
     for group in groups:
         tf_key    = f'{catalog}|{group}'
         import_id = f'catalog/{catalog}/{group}'
-        print(f'catalog_access|{tf_key}|{import_id}')
+        print(f'catalog_access{sep}{tf_key}{sep}{import_id}')
     if client_id:
         import_id = f'catalog/{catalog}/{client_id}'
-        print(f'terraform_sp|{catalog}|{import_id}')
+        print(f'terraform_sp{sep}{catalog}{sep}{import_id}')
 " 2>/dev/null || true
 }
 
@@ -376,12 +478,16 @@ if $IMPORT_TAG_ASSIGNMENTS; then
   if [ "$LAYER" != "data_access" ]; then
     echo "  Skipping tag assignment imports outside envs/<workspace>/data_access"
   else
+    # Pre-cleanup: remove stale assignments (wrong tag_value from prior LLM run)
+    echo "  Pre-cleanup: removing stale tag assignments via SQL..."
+    cleanup_stale_tag_assignments 2>&1 | sed 's/^/  /'
+
     tag_assignment_entries=$(extract_tag_assignments)
     if [ -z "$tag_assignment_entries" ]; then
       echo "  No tag assignments found in abac.auto.tfvars."
     else
-      # Format: <tf_key>::<import_id>  (:: separator avoids conflict with | in values)
-      while IFS='::' read -r tf_key import_id; do
+      # TAB-separated: tf_key<TAB>import_id
+      while IFS=$'\t' read -r tf_key import_id; do
         [ -z "$tf_key" ] && continue
         run_import "module.data_access.databricks_entity_tag_assignment.assignments[\"$tf_key\"]" "$import_id"
         ((imported++)) || true
@@ -400,12 +506,13 @@ if $IMPORT_GRANTS; then
     if [ -z "$grant_entries" ]; then
       echo "  No grants derivable from abac.auto.tfvars."
     else
-      while IFS='|' read -r grant_type tf_key import_id; do
+      # TAB-separated: grant_type<TAB>tf_key<TAB>import_id
+      # tf_key may contain | (e.g. "dev_fin|Finance_Analyst") — TAB IFS handles this correctly
+      while IFS=$'\t' read -r grant_type tf_key import_id; do
         [ -z "$grant_type" ] && continue
         if [ "$grant_type" = "catalog_access" ]; then
           run_import "module.data_access.databricks_grant.catalog_access[\"$tf_key\"]" "$import_id"
         elif [ "$grant_type" = "terraform_sp" ]; then
-          # tf_key is just the catalog name here
           run_import "module.data_access.databricks_grant.terraform_sp_manage_catalog[\"$tf_key\"]" "$import_id"
         fi
         ((imported++)) || true
