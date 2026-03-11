@@ -314,6 +314,9 @@ PYEOF
 # Outputs TAB-separated lines: grant_type<TAB>tf_key<TAB>import_id
 # grant_type is "catalog_access" or "terraform_sp"
 # tf_key may contain | (e.g. "dev_fin|Finance_Analyst") — use TAB IFS to parse correctly
+# Outputs TAB-separated lines: grant_type<TAB>tf_key<TAB>import_id
+# Only emits grants that ACTUALLY EXIST in Databricks (verified via SDK)
+# to avoid "Cannot import non-existent remote object" noise.
 extract_grants() {
   python3 -c "
 import hcl2, sys, os
@@ -330,7 +333,9 @@ for fname in ['auth.auto.tfvars', '../auth.auto.tfvars']:
             pass
         break
 
-client_id = _str(auth.get('databricks_client_id', '')) or os.environ.get('DATABRICKS_CLIENT_ID', '')
+host          = _str(auth.get('databricks_workspace_host', ''))
+client_id     = _str(auth.get('databricks_client_id', '')) or os.environ.get('DATABRICKS_CLIENT_ID', '')
+client_secret = _str(auth.get('databricks_client_secret', ''))
 
 try:
     with open('abac.auto.tfvars') as f:
@@ -356,13 +361,36 @@ for t in uc_tables:
     if t.count('.') >= 2:
         catalogs.add(t.split('.')[0])
 
+# Build set of principals that actually have grants on each catalog
+existing_grants = {}  # catalog -> set of principals
+try:
+    from databricks.sdk import WorkspaceClient
+    from databricks.sdk.service.catalog import SecurableType
+    w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
+    for catalog in sorted(catalogs):
+        try:
+            result = w.grants.get(SecurableType.CATALOG, catalog)
+            principals = set()
+            for pa in (result.privilege_assignments or []):
+                if pa.principal:
+                    principals.add(pa.principal)
+            existing_grants[catalog] = principals
+        except Exception:
+            existing_grants[catalog] = None  # unknown — fall back to attempting import
+except Exception as sdk_err:
+    sys.stderr.write(f'WARNING: grants SDK check failed ({sdk_err}), falling back\n')
+    existing_grants = {}  # empty => fall back
+
 sep = '\t'
 for catalog in sorted(catalogs):
+    known = existing_grants.get(catalog)  # None means unknown, set means verified
     for group in groups:
+        if known is not None and group not in known:
+            continue  # grant does not exist — skip to avoid import error
         tf_key    = f'{catalog}|{group}'
         import_id = f'catalog/{catalog}/{group}'
         print(f'catalog_access{sep}{tf_key}{sep}{import_id}')
-    if client_id:
+    if client_id and (known is None or client_id in known):
         import_id = f'catalog/{catalog}/{client_id}'
         print(f'terraform_sp{sep}{catalog}{sep}{import_id}')
 " 2>/dev/null || true
@@ -419,19 +447,63 @@ except Exception as e:
 
 # Outputs TAB-separated lines: tf_key<TAB>import_id
 # import_id format: on_securable_type,on_securable_fullname,name  (required by provider)
+# Only emits policies that EXIST in Databricks (verified via REST API).
 extract_fgac_names() {
   python3 -c "
-import hcl2, sys
+import hcl2, sys, os
+
+def _str(v): return (v[0] if isinstance(v, list) else v or '').strip()
+
 with open('abac.auto.tfvars') as f:
     cfg = hcl2.load(f)
+
+desired = []  # list of (name, catalog, sec_type, full_name)
 for p in cfg.get('fgac_policies', []):
-    name    = p.get('name', '')
-    catalog = p.get('catalog', '')
+    name     = p.get('name', '')
+    catalog  = p.get('catalog', '')
     sec_type = p.get('on_securable_type', 'CATALOG')
     if name and catalog:
-        full_name = f'{catalog}_{name}'
-        import_id = f'{sec_type},{catalog},{full_name}'
-        print(name + '\t' + import_id)
+        desired.append((name, catalog, sec_type, f'{catalog}_{name}'))
+
+if not desired:
+    sys.exit(0)
+
+# Check which policies actually exist via WorkspaceClient REST API
+auth = {}
+for fname in ['auth.auto.tfvars', '../auth.auto.tfvars']:
+    if os.path.exists(fname):
+        try:
+            with open(fname) as f:
+                auth = hcl2.load(f)
+        except Exception:
+            pass
+        break
+
+existing_by_catalog = {}  # catalog -> set of full policy names (or None if unknown)
+try:
+    host          = _str(auth.get('databricks_workspace_host', ''))
+    client_id     = _str(auth.get('databricks_client_id', ''))
+    client_secret = _str(auth.get('databricks_client_secret', ''))
+    from databricks.sdk import WorkspaceClient
+    from databricks.sdk.service.catalog import SecurableType
+    w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
+    catalogs = set(d[1] for d in desired)
+    for catalog in catalogs:
+        try:
+            policies = list(w.policy_infos.list_policy_infos_for_securable(
+                SecurableType.CATALOG, catalog))
+            existing_by_catalog[catalog] = {p.name for p in policies if p.name}
+        except Exception:
+            existing_by_catalog[catalog] = None  # unknown — fall back
+except Exception as e:
+    sys.stderr.write(f'WARNING: policy_infos check failed ({e}), falling back\n')
+
+for (name, catalog, sec_type, full_name) in desired:
+    known = existing_by_catalog.get(catalog)
+    if known is not None and full_name not in known:
+        continue  # policy does not exist yet — skip to avoid import error
+    import_id = f'{sec_type},{catalog},{full_name}'
+    print(name + '\t' + import_id)
 " 2>/dev/null || true
 }
 
