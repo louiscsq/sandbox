@@ -391,19 +391,22 @@ except Exception as e:
 " 2>/dev/null || true
 }
 
+# Outputs TAB-separated lines: tf_key<TAB>import_id
+# import_id format: on_securable_type,on_securable_fullname,name  (required by provider)
 extract_fgac_names() {
   python3 -c "
 import hcl2, sys
 with open('abac.auto.tfvars') as f:
     cfg = hcl2.load(f)
 for p in cfg.get('fgac_policies', []):
-    name = p.get('name', '')
+    name    = p.get('name', '')
     catalog = p.get('catalog', '')
+    sec_type = p.get('on_securable_type', 'CATALOG')
     if name and catalog:
-        print(name + '|' + catalog + '_' + name)
-" 2>/dev/null || {
-    echo "WARNING: Could not parse tfvars files with python-hcl2." >&2
-  }
+        full_name = f'{catalog}_{name}'
+        import_id = f'{sec_type},{catalog},{full_name}'
+        print(name + '\t' + import_id)
+" 2>/dev/null || true
 }
 
 echo "============================================"
@@ -463,9 +466,11 @@ if $IMPORT_FGAC; then
     if [ -z "$fgac_entries" ]; then
       echo "  No FGAC policies found in abac.auto.tfvars."
     else
-      while IFS='|' read -r policy_key policy_name; do
+      # TAB-separated: tf_key<TAB>import_id
+      # import_id format: on_securable_type,on_securable_fullname,name
+      while IFS=$'\t' read -r policy_key import_id; do
         [ -z "$policy_key" ] && continue
-        run_import "module.data_access.databricks_policy_info.policies[\"$policy_key\"]" "$policy_name"
+        run_import "module.data_access.databricks_policy_info.policies[\"$policy_key\"]" "$import_id"
         ((imported++)) || true
       done <<< "$fgac_entries"
     fi
