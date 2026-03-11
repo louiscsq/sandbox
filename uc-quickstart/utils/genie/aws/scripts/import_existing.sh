@@ -84,18 +84,67 @@ run_import() {
   fi
 }
 
-# Extract group names from abac.auto.tfvars using grep/sed
-extract_group_names() {
+# Look up group display-names from abac.auto.tfvars and resolve their numeric
+# account-level SCIM IDs via the Databricks SDK (required for terraform import).
+# Outputs "name:scim_id" lines; falls back to "name:" (empty ID) if unreachable.
+extract_group_name_id_pairs() {
   python3 -c "
-import hcl2, sys
-with open('abac.auto.tfvars') as f:
-    cfg = hcl2.load(f)
-for name in cfg.get('groups', {}):
-    print(name)
-" 2>/dev/null || {
-    echo "WARNING: Could not parse abac.auto.tfvars with python-hcl2." >&2
-    echo "Install with: pip install python-hcl2" >&2
-  }
+import hcl2, sys, os
+
+# ── 1. Read group names from abac.auto.tfvars ──────────────────────────────
+try:
+    with open('abac.auto.tfvars') as f:
+        cfg = hcl2.load(f)
+    group_names = list(cfg.get('groups', {}).keys())
+except Exception as e:
+    sys.stderr.write(f'WARNING: Could not parse abac.auto.tfvars: {e}\n')
+    sys.exit(0)
+
+if not group_names:
+    sys.exit(0)
+
+# ── 2. Load auth credentials ───────────────────────────────────────────────
+def _str(v):
+    return (v[0] if isinstance(v, list) else v or '').strip()
+
+auth = {}
+for fname in ['auth.auto.tfvars']:
+    if os.path.exists(fname):
+        try:
+            with open(fname) as f:
+                auth = hcl2.load(f)
+        except Exception:
+            pass
+        break
+
+account_id    = _str(auth.get('databricks_account_id', ''))    or os.environ.get('DATABRICKS_ACCOUNT_ID', '')
+client_id     = _str(auth.get('databricks_client_id', ''))     or os.environ.get('DATABRICKS_CLIENT_ID', '')
+client_secret = _str(auth.get('databricks_client_secret', '')) or os.environ.get('DATABRICKS_CLIENT_SECRET', '')
+
+# ── 3. Look up each group's numeric SCIM ID ────────────────────────────────
+if not account_id:
+    sys.stderr.write('WARNING: No databricks_account_id found; skipping group ID lookup.\n')
+    sys.exit(0)
+
+try:
+    from databricks.sdk import AccountClient
+    a = AccountClient(
+        host='https://accounts.cloud.databricks.com',
+        account_id=account_id,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+    for name in group_names:
+        try:
+            found = list(a.groups.list(filter=f'displayName eq \"{name}\"'))
+            if found and found[0].id:
+                print(name + ':' + str(found[0].id))
+            # If not found, print nothing — the group doesn't exist, import not needed
+        except Exception as e:
+            sys.stderr.write(f'WARNING: group lookup failed for {name!r}: {e}\n')
+except ImportError:
+    sys.stderr.write('WARNING: databricks-sdk not installed; cannot look up group IDs.\n')
+" 2>/dev/null || true
 }
 
 extract_tag_keys() {
@@ -158,15 +207,15 @@ if $IMPORT_GROUPS; then
     echo ""
   else
     echo "--- Groups ---"
-    group_names=$(extract_group_names)
-    if [ -z "$group_names" ]; then
-      echo "  No groups found in abac.auto.tfvars."
+    group_pairs=$(extract_group_name_id_pairs)
+    if [ -z "$group_pairs" ]; then
+      echo "  No existing groups found to import."
     else
-      while IFS= read -r name; do
-        [ -z "$name" ] && continue
-        run_import "module.account.databricks_group.groups[\"$name\"]" "$name"
+      while IFS=':' read -r name group_id; do
+        [ -z "$name" ] || [ -z "$group_id" ] && continue
+        run_import "module.account.databricks_group.groups[\"$name\"]" "$group_id"
         ((imported++)) || true
-      done <<< "$group_names"
+      done <<< "$group_pairs"
     fi
     echo ""
   fi

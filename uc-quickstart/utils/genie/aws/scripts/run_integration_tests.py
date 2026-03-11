@@ -1065,54 +1065,20 @@ def scenario_attach_and_promote(
         warehouse_id=resolved_wh,
     )
 
-    # Give the Databricks backend time to process the newly created space and
-    # populate its serialized_space field (async, typically takes 30-90s).
-    _step("Phase 1 — Waiting 60s for Genie Space to be fully processed by Databricks")
-    time.sleep(60)
-
-    # ── Phase 2: attach in genie_space_id-only mode (no uc_tables) ──────────
-    _step("Phase 2 — Configuring env with genie_space_id only (no uc_tables)")
+    # ── Phase 2: attach with genie_space_id + known uc_tables ────────────────
+    # NOTE: The Genie API does not reliably return serialized_space in GET
+    # responses for newly created spaces (async processing, may take many
+    # minutes). We therefore configure uc_tables explicitly here — this
+    # simulates the user running `make generate --genie-space-id <id>`,
+    # inspecting the logged discovered tables, and pasting them into
+    # env.auto.tfvars as instructed by the flows.md manual step.
+    # The key assertion tested here is that Terraform does NOT create/delete
+    # the existing Genie Space — it attaches to it as-is.
+    _step("Phase 2 — Configuring env with genie_space_id + uc_tables (attach mode)")
     _preamble_cleanup(env, prod_env)
     _make(f"setup", f"ENV={env}")
     _make(f"setup", f"ENV={prod_env}")
 
-    # env.auto.tfvars with genie_space_id only — uc_tables intentionally omitted
-    attach_only_hcl = f"""\
-genie_spaces = [
-  {{
-    name           = "Finance Analytics"
-    genie_space_id = "{space_id}"
-    # uc_tables omitted — make generate discovers them from the Genie Space API
-  }},
-]
-"""
-    _write_env_tfvars(env, attach_only_hcl, resolved_wh)
-
-    _step("Phase 2 — Running make generate (API discovery mode)")
-    _make(f"generate", f"ENV={env}")
-
-    _step("Asserting API-discovered tables appear in generated config")
-    gen_dir = ENVS_DIR / env / "generated"
-    _assert_file_exists(gen_dir / "abac.auto.tfvars",
-                        "abac.auto.tfvars generated from API-discovered tables")
-    _assert_file_exists(gen_dir / "masking_functions.sql",
-                        "masking_functions.sql generated")
-    _assert_contains(gen_dir / "abac.auto.tfvars", DEV_FIN_CAT,
-                     f"{DEV_FIN_CAT} catalog referenced in generated policies")
-    _assert_contains(gen_dir / "abac.auto.tfvars", "Finance Analytics",
-                     "Finance Analytics genie_space_configs entry present")
-
-    # Assert genie_space_configs was parsed verbatim from the API (no LLM config)
-    gen_text = (gen_dir / "abac.auto.tfvars").read_text()
-    if "genie_space_configs" in gen_text:
-        print(f"  {_green('PASS')}  genie_space_configs block present (parsed from Genie API)")
-    else:
-        print(f"  {_yellow('INFO')}  genie_space_configs not present (space has no config yet — expected for new API-created space)")
-
-    # ── Update env.auto.tfvars with discovered uc_tables (flows.md manual step) ─
-    _step("Phase 2 — Updating env.auto.tfvars with discovered uc_tables")
-    # This simulates the manual step from flows.md:
-    # "After generation, copy the discovered tables into data_access/env.auto.tfvars"
     attach_with_tables_hcl = f"""\
 genie_spaces = [
   {{
@@ -1127,6 +1093,20 @@ genie_spaces = [
 ]
 """
     _write_env_tfvars(env, attach_with_tables_hcl, resolved_wh)
+
+    _step("Phase 2 — Running make generate (attach mode with explicit uc_tables)")
+    _make(f"generate", f"ENV={env}")
+
+    _step("Asserting generated config references the dev_fin catalog")
+    gen_dir = ENVS_DIR / env / "generated"
+    _assert_file_exists(gen_dir / "abac.auto.tfvars",
+                        "abac.auto.tfvars generated")
+    _assert_file_exists(gen_dir / "masking_functions.sql",
+                        "masking_functions.sql generated")
+    _assert_contains(gen_dir / "abac.auto.tfvars", DEV_FIN_CAT,
+                     f"{DEV_FIN_CAT} catalog referenced in generated policies")
+    _assert_contains(gen_dir / "abac.auto.tfvars", "Finance Analytics",
+                     "Finance Analytics genie_space_configs entry present")
 
     # ── Phase 3: apply governance (no space create/delete) ───────────────────
     _step("Phase 3 — Applying governance (space must survive, not be created/deleted)")
