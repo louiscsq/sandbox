@@ -294,6 +294,10 @@ _apply-layer:
 		exit 0; \
 	fi; \
 	echo "=== Terraform Apply ($$layer:$$target_env) ==="; \
+	if [ "$$layer" = "account" ]; then \
+		echo "=== Auto-importing existing account resources (idempotent apply) ==="; \
+		(cd "$$env_dir" && TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(MODULE_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
+	fi; \
 	"$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve; \
 	printf "%s\n" "$$current_fingerprint" > "$$fingerprint_file"
 
@@ -396,6 +400,59 @@ clean-all: ## Remove all env workspaces under envs/
 	@echo "=== Clean All Environments ==="
 	@rm -rf "$(MODULE_ROOT)/envs"
 	@echo "Removed $(MODULE_ROOT)/envs"
+
+_ITEST_RUNNER   := python3 "$(MODULE_ROOT)/scripts/run_integration_tests.py"
+_ITEST_AUTH     := $(ENV_DIR)/auth.auto.tfvars
+_ITEST_WH_FLAG  := $(if $(WAREHOUSE_ID),--warehouse-id $(WAREHOUSE_ID),)
+_ITEST_KD_FLAG  := $(if $(KEEP_DATA),--keep-data,)
+
+test-quickstart: _bootstrap _guard-workspace-target ## Scenario: single space, single catalog (quickstart flow)
+	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario quickstart \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-multi-catalog: _bootstrap _guard-workspace-target ## Scenario: one Genie Space spanning two catalogs
+	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario multi-catalog \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-multi-space: _bootstrap _guard-workspace-target ## Scenario: two Genie Spaces with separate catalogs
+	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario multi-space \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-per-space: _bootstrap _guard-workspace-target ## Scenario: incremental per-space generation (isolation test)
+	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario per-space \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-promote: _bootstrap _guard-workspace-target ## Scenario: multi-space dev → prod promotion
+	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario promote \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-multi-env: _bootstrap _guard-workspace-target ## Scenario: two independent envs (dev Finance, bu2 Clinical)
+	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario multi-env \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-attach-promote: _bootstrap _guard-workspace-target ## Scenario: attach to UI-created space via API discovery, then promote to prod
+	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario attach-promote \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-all: _bootstrap _guard-workspace-target ## Run all scenario tests sequentially
+	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario all \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
 integration-test: ## Run the full end-to-end integration test (setup → generate → apply → verify → promote → apply prod → verify prod → teardown)
 	@# Options:

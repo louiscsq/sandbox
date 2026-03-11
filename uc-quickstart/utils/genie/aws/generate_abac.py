@@ -442,12 +442,14 @@ def fetch_tables_from_genie_space(space_id: str, auth_cfg: dict) -> tuple[list[s
     description = resp.get("description", "")
     serialized = resp.get("serialized_space", "")
 
-    # Genie Spaces may take a few seconds after creation before serialized_space
-    # is populated.  Retry with exponential backoff before giving up.
+    # Genie Spaces may take 1-3 minutes after creation before serialized_space
+    # is populated by the Databricks backend (async processing).
+    # Retry with increasing backoff — total budget ~4 minutes.
     if not serialized:
-        for attempt, delay in enumerate([3, 5, 10, 15, 20], start=1):
+        retry_delays = [5, 10, 20, 30, 45, 60, 90]
+        for attempt, delay in enumerate(retry_delays, start=1):
             print(f"  Genie Space {space_id} has no serialized_space yet — "
-                  f"retrying in {delay}s (attempt {attempt}/5)...")
+                  f"retrying in {delay}s (attempt {attempt}/{len(retry_delays)})...")
             _time.sleep(delay)
             try:
                 resp = w.api_client.do("GET", f"/api/2.0/genie/spaces/{space_id}")

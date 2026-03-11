@@ -1065,6 +1065,11 @@ def scenario_attach_and_promote(
         warehouse_id=resolved_wh,
     )
 
+    # Give the Databricks backend time to process the newly created space and
+    # populate its serialized_space field (async, typically takes 30-90s).
+    _step("Phase 1 — Waiting 60s for Genie Space to be fully processed by Databricks")
+    time.sleep(60)
+
     # ── Phase 2: attach in genie_space_id-only mode (no uc_tables) ──────────
     _step("Phase 2 — Configuring env with genie_space_id only (no uc_tables)")
     _preamble_cleanup(env, prod_env)
