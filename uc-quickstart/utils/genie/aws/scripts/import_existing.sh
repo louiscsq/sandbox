@@ -396,11 +396,10 @@ PYEOF
 # Outputs TAB-separated lines: grant_type<TAB>tf_key<TAB>import_id
 # grant_type is "catalog_access" or "terraform_sp"
 # tf_key may contain | (e.g. "dev_fin|Finance_Analyst") — use TAB IFS to parse correctly
-# Outputs TAB-separated lines: grant_type<TAB>tf_key<TAB>import_id
 # Only emits grants that ACTUALLY EXIST in Databricks (verified via SDK)
 # to avoid "Cannot import non-existent remote object" noise.
 extract_grants() {
-  python3 -c "
+  python3 - << 'GEOF'
 import hcl2, sys, os
 
 def _str(v): return (v[0] if isinstance(v, list) else v or '').strip()
@@ -427,7 +426,7 @@ try:
     fgac_policies   = cfg.get('fgac_policies', [])
     uc_tables       = cfg.get('uc_tables', []) or []
 except Exception as e:
-    sys.stderr.write(f'WARNING: {e}\n')
+    sys.stderr.write(f'WARNING: extract_grants config load failed: {e}\n')
     sys.exit(0)
 
 catalogs = set()
@@ -443,39 +442,58 @@ for t in uc_tables:
     if t.count('.') >= 2:
         catalogs.add(t.split('.')[0])
 
-# Build set of principals that actually have grants on each catalog
-existing_grants = {}  # catalog -> set of principals
+# Query Databricks REST API to find which principals actually have grants.
+# Uses requests + token auth to avoid SDK version/method-name uncertainty.
+existing_grants = {}  # catalog -> set(principal) or None (unknown=fallback)
 try:
+    import urllib.request, urllib.error, json as _json
+
+    # Obtain a token via the SDK (handles M2M OAuth automatically).
     from databricks.sdk import WorkspaceClient
-    from databricks.sdk.service.catalog import SecurableType
     w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
+    token = w.config.authenticate()  # dict of headers, e.g. {'Authorization': 'Bearer ...'}
+
+    base = host.rstrip('/')
     for catalog in sorted(catalogs):
+        url = f'{base}/api/2.1/unity-catalog/permissions/catalog/{catalog}'
+        req = urllib.request.Request(url, headers=token)
         try:
-            result = w.grants.get(SecurableType.CATALOG, catalog)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read())
             principals = set()
-            for pa in (result.privilege_assignments or []):
-                if pa.principal:
-                    principals.add(pa.principal)
+            for pa in data.get('privilege_assignments', []):
+                p = pa.get('principal', '')
+                if p:
+                    principals.add(p)
             existing_grants[catalog] = principals
-        except Exception:
-            existing_grants[catalog] = None  # unknown — fall back to attempting import
+        except urllib.error.HTTPError as he:
+            if he.code in (403, 404):
+                # 403 = SP has no privilege; 404 = catalog doesn't exist yet.
+                # Treat as "no grants" — skip all imports for this catalog.
+                existing_grants[catalog] = set()
+            else:
+                sys.stderr.write(f'WARNING: grants check for {catalog} returned HTTP {he.code}, falling back\n')
+                existing_grants[catalog] = None
+        except Exception as e:
+            sys.stderr.write(f'WARNING: grants check for {catalog} failed: {e}, falling back\n')
+            existing_grants[catalog] = None
 except Exception as sdk_err:
-    sys.stderr.write(f'WARNING: grants SDK check failed ({sdk_err}), falling back\n')
-    existing_grants = {}  # empty => fall back
+    sys.stderr.write(f'WARNING: grants SDK/auth failed: {sdk_err}, falling back\n')
+    existing_grants = {}  # all None => fall back for every catalog
 
 sep = '\t'
 for catalog in sorted(catalogs):
-    known = existing_grants.get(catalog)  # None means unknown, set means verified
+    known = existing_grants.get(catalog)  # None=unknown(fallback), set=verified
     for group in groups:
         if known is not None and group not in known:
             continue  # grant does not exist — skip to avoid import error
-        tf_key    = f'{catalog}|{group}'
-        import_id = f'catalog/{catalog}/{group}'
-        print(f'catalog_access{sep}{tf_key}{sep}{import_id}')
+        tf_key    = catalog + '|' + group
+        import_id = 'catalog/' + catalog + '/' + group
+        sys.stdout.write('catalog_access' + sep + tf_key + sep + import_id + '\n')
     if client_id and (known is None or client_id in known):
-        import_id = f'catalog/{catalog}/{client_id}'
-        print(f'terraform_sp{sep}{catalog}{sep}{import_id}')
-" 2>/dev/null || true
+        import_id = 'catalog/' + catalog + '/' + client_id
+        sys.stdout.write('terraform_sp' + sep + catalog + sep + import_id + '\n')
+GEOF
 }
 
 # Find the warehouse name used by this data_access env and return its ID.
