@@ -359,13 +359,18 @@ def _clean_account_artifacts() -> None:
 # ---------------------------------------------------------------------------
 
 def _try_destroy(env: str) -> None:
-    """Destroy Terraform resources for env if state exists."""
+    """Destroy Terraform resources for env if state exists.
+
+    Passes -lock=false so that a stale advisory lock left by a previously
+    killed process does not block the cleanup.  The lock is meaningless at
+    this point because we are the only process touching the state.
+    """
     state = ENVS_DIR / env / "terraform.tfstate"
     da_state = ENVS_DIR / env / "data_access" / "terraform.tfstate"
     if not state.exists() and not da_state.exists():
         return
     _step(f"Destroying {env} Terraform resources")
-    _make(f"destroy", f"ENV={env}", check=False)
+    _make(f"destroy", f"ENV={env}", "DESTROY_FLAGS=-lock=false", check=False)
 
 
 def _try_destroy_account() -> None:
@@ -373,7 +378,7 @@ def _try_destroy_account() -> None:
     if not state.exists():
         return
     _step("Destroying account Terraform resources")
-    _make("destroy", "ENV=account", check=False)
+    _make("destroy", "ENV=account", "DESTROY_FLAGS=-lock=false", check=False)
 
 
 def _force_delete_fgac_policies(*envs: str) -> None:

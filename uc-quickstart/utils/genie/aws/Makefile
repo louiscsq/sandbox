@@ -378,7 +378,7 @@ migrate-state: _bootstrap ## Migrate legacy state into account/data_access/works
 _destroy-layer:
 	@layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
 	echo "=== Terraform Destroy ($$layer:$$target_env) ==="; \
-	"$(ROOT_RUNNER)" "$$layer" "$$target_env" destroy -auto-approve
+	"$(ROOT_RUNNER)" "$$layer" "$$target_env" destroy -auto-approve $(DESTROY_FLAGS)
 
 destroy: _bootstrap ## Destroy the selected layer or workspace environment
 	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
