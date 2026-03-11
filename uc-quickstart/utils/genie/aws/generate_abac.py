@@ -1012,6 +1012,81 @@ def autofix_tag_policies(tfvars_path: Path) -> int:
     return added_total
 
 
+# Databricks platform limit for ABAC column-mask/row-filter policies per catalog.
+_FGAC_PER_CATALOG_LIMIT = 8  # hard cap; platform enforces 10, we use 8 for headroom
+
+
+def autofix_fgac_policy_count(tfvars_path: Path) -> int:
+    """Trim fgac_policies to at most _FGAC_PER_CATALOG_LIMIT per catalog.
+
+    Databricks enforces a hard limit of 10 ABAC policies per catalog.
+    If the LLM produces more, this function removes excess entries (least
+    important ones — those appearing last in the list) and rewrites the file.
+
+    Returns the number of policies removed.
+    """
+    try:
+        import hcl2  # type: ignore
+    except ImportError:
+        return 0
+
+    text = tfvars_path.read_text()
+
+    try:
+        cfg = hcl2.loads(text)
+    except Exception:
+        return 0
+
+    policies = cfg.get("fgac_policies", [])
+    if not policies:
+        return 0
+
+    # Count per catalog and build list of names to drop (keep first N per catalog).
+    per_catalog: dict[str, list[str]] = {}
+    for p in policies:
+        cat = p.get("catalog", "") or p.get("function_catalog", "")
+        name = p.get("name", "")
+        if cat and name:
+            per_catalog.setdefault(cat, []).append(name)
+
+    to_drop: set[str] = set()
+    for cat, names in per_catalog.items():
+        if len(names) > _FGAC_PER_CATALOG_LIMIT:
+            excess = names[_FGAC_PER_CATALOG_LIMIT:]
+            to_drop.update(excess)
+            print(
+                f"  [AUTOFIX] Catalog '{cat}': {len(names)} fgac_policies exceeds "
+                f"limit of {_FGAC_PER_CATALOG_LIMIT}. Dropping {len(excess)}: "
+                + ", ".join(excess)
+            )
+
+    if not to_drop:
+        return 0
+
+    # Remove each excess policy block from the HCL text.
+    # A policy block looks like:  {  ...  name = "..."  ...  }
+    # We locate each block by finding `name = "<dropped_name>"` and walk
+    # outward to find the enclosing { ... } pair.
+    removed = 0
+    for name in to_drop:
+        # Find the name assignment
+        pattern = re.compile(
+            r'\{\s*(?:[^{}]*?)\s*name\s*=\s*"' + re.escape(name) + r'"[^{}]*?\}',
+            re.DOTALL,
+        )
+        new_text, count = pattern.subn("", text, count=1)
+        if count:
+            text = new_text
+            removed += 1
+
+    if removed:
+        # Clean up double-blank lines left by removal
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        tfvars_path.write_text(text)
+
+    return removed
+
+
 def sanitize_space_key(name: str) -> str:
     """Convert a human-readable space name to a safe directory/Terraform key.
 
@@ -1515,6 +1590,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
         n_fixed = autofix_tag_policies(tfvars_path)
         if n_fixed:
             print(f"  Auto-fixed {n_fixed} missing tag_policy value(s)")
+
+        n_dropped = autofix_fgac_policy_count(tfvars_path)
+        if n_dropped:
+            print(f"  Auto-fixed: dropped {n_dropped} fgac_policy/ies exceeding per-catalog limit ({_FGAC_PER_CATALOG_LIMIT})")
 
         # ── Per-space mode: bootstrap per-space dir, then merge into assembled ──
         if target_space_cfg is not None and space_key:
