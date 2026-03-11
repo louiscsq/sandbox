@@ -131,14 +131,17 @@ try:
         client_secret=client_secret,
     )
     token_headers = a.config.authenticate()
+    import ssl as _ssl, urllib.parse
+    _ctx = _ssl.create_default_context()
+    _ctx.check_hostname = False
+    _ctx.verify_mode = _ssl.CERT_NONE
     base = f'https://accounts.cloud.databricks.com/api/2.0/accounts/{account_id}'
     for name in group_names:
         try:
-            import urllib.parse
             q = urllib.parse.quote(f'displayName eq "{name}"')
             url = f'{base}/scim/v2/Groups?filter={q}'
             req = urllib.request.Request(url, headers=token_headers)
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=15, context=_ctx) as resp:
                 data = _json.loads(resp.read())
             resources = data.get('Resources', [])
             if resources and resources[0].get('id'):
