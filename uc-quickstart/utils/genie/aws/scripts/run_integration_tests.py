@@ -384,7 +384,20 @@ def _force_delete_fgac_policies(*envs: str) -> None:
     failed and the state file was then wiped), terraform apply in the next run
     will fail with "estimated count exceeds limit".  This function proactively
     deletes every policy_info it finds so each scenario starts from zero.
+
+    Uses the REST API directly (not SDK) because policy_infos may not be
+    available in all installed SDK versions.
     """
+    import ssl as _ssl
+    import urllib.request as _urq
+    import urllib.error as _ure
+    import urllib.parse as _urp
+    import json as _json
+
+    _ssl_ctx = _ssl.create_default_context()
+    _ssl_ctx.check_hostname = False
+    _ssl_ctx.verify_mode = _ssl.CERT_NONE
+
     for env in envs:
         auth_file = ENVS_DIR / env / "auth.auto.tfvars"
         if not auth_file.exists():
@@ -392,7 +405,6 @@ def _force_delete_fgac_policies(*envs: str) -> None:
         try:
             import hcl2 as _hcl2
             from databricks.sdk import WorkspaceClient as _WC
-            from databricks.sdk.service.catalog import SecurableType as _ST
 
             def _s(v): return (v[0] if isinstance(v, list) else (v or "")).strip()
 
@@ -404,6 +416,8 @@ def _force_delete_fgac_policies(*envs: str) -> None:
             if not host:
                 continue
             w = _WC(host=host, client_id=client_id, client_secret=client_secret)
+            token = w.config.authenticate()  # {'Authorization': 'Bearer ...'}
+            base  = host.rstrip("/")
 
             # Only clean catalogs that look like test catalogs (dev_*, prod_*, bu2_*)
             test_prefixes = ("dev_", "prod_", "bu2_")
@@ -415,22 +429,31 @@ def _force_delete_fgac_policies(*envs: str) -> None:
 
             for cat in all_cats:
                 try:
-                    policies = list(w.policy_infos.list_policy_infos_for_securable(
-                        securable_type=_ST.CATALOG,
-                        securable_fullname=cat,
-                    ))
+                    qs = _urp.urlencode({"on_securable_type": "CATALOG",
+                                         "on_securable_fullname": cat})
+                    list_url = f"{base}/api/2.1/unity-catalog/policy-infos?{qs}"
+                    req = _urq.Request(list_url, headers=token)
+                    with _urq.urlopen(req, timeout=15, context=_ssl_ctx) as resp:
+                        data = _json.loads(resp.read())
+                    policies = data.get("policy_infos", [])
                     for p in policies:
+                        pname = p.get("name", "")
+                        if not pname:
+                            continue
+                        del_qs  = _urp.urlencode({"on_securable_type": "CATALOG",
+                                                   "on_securable_fullname": cat})
+                        del_url = f"{base}/api/2.1/unity-catalog/policy-infos/{_urp.quote(pname, safe='')}?{del_qs}"
+                        del_req = _urq.Request(del_url, headers=token, method="DELETE")
                         try:
-                            w.policy_infos.delete_policy_info(
-                                name=p.name,
-                                on_securable_type=_ST.CATALOG,
-                                on_securable_fullname=cat,
-                            )
-                            print(f"  Force-deleted orphaned FGAC policy: {cat}/{p.name}")
+                            _urq.urlopen(del_req, timeout=15, context=_ssl_ctx)
+                            print(f"  Force-deleted orphaned FGAC policy: {cat}/{pname}")
                         except Exception as del_err:
-                            print(f"  WARN: could not delete FGAC policy {cat}/{p.name}: {del_err}")
-                except Exception:
-                    pass  # catalog may not support policy_infos; skip
+                            print(f"  WARN: could not delete FGAC policy {cat}/{pname}: {del_err}")
+                except _ure.HTTPError as he:
+                    if he.code not in (403, 404):
+                        print(f"  WARN: policy-infos list HTTP {he.code} for {cat}")
+                except Exception as cat_err:
+                    print(f"  WARN: policy-infos list failed for {cat}: {cat_err}")
         except Exception as exc:
             print(f"  WARN: force_delete_fgac_policies({env}) failed: {exc}")
 

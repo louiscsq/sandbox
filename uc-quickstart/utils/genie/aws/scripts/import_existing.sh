@@ -601,19 +601,34 @@ for fname in ['auth.auto.tfvars', '../auth.auto.tfvars']:
 
 existing_by_catalog = {}  # catalog -> set of full policy names, or None=unknown
 try:
+    import urllib.request, urllib.error, urllib.parse, json as _json, ssl as _ssl
     host          = _str(auth.get('databricks_workspace_host', ''))
     client_id     = _str(auth.get('databricks_client_id', ''))
     client_secret = _str(auth.get('databricks_client_secret', ''))
     from databricks.sdk import WorkspaceClient
-    from databricks.sdk.service.catalog import SecurableType
     w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
+    token = w.config.authenticate()
+    base  = host.rstrip('/')
+    ssl_ctx = _ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = _ssl.CERT_NONE
     for catalog in set(d[1] for d in desired):
         try:
-            policies = list(w.policy_infos.list_policy_infos_for_securable(
-                securable_type=SecurableType.CATALOG,
-                securable_fullname=catalog,
-            ))
-            existing_by_catalog[catalog] = {p.name for p in policies if p.name}
+            qs  = urllib.parse.urlencode({'on_securable_type': 'CATALOG',
+                                          'on_securable_fullname': catalog})
+            url = f'{base}/api/2.1/unity-catalog/policy-infos?{qs}'
+            req = urllib.request.Request(url, headers=token)
+            with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
+                data = _json.loads(resp.read())
+            existing_by_catalog[catalog] = {
+                p.get('name', '') for p in data.get('policy_infos', []) if p.get('name')
+            }
+        except urllib.error.HTTPError as he:
+            if he.code in (403, 404):
+                existing_by_catalog[catalog] = set()  # no policies
+            else:
+                sys.stderr.write(f'WARNING: policy_infos HTTP {he.code} for {catalog}\n')
+                existing_by_catalog[catalog] = None
         except Exception as e:
             sys.stderr.write(f'WARNING: policy_infos list failed for {catalog}: {e}\n')
             existing_by_catalog[catalog] = None  # unknown — fall back
