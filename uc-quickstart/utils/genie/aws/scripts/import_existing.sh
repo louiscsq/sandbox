@@ -190,22 +190,104 @@ except Exception as e:
 
 # Outputs TAB-separated lines: tf_key<TAB>import_id
 # import_id format: entity_type,entity_name,tag_key  (commas — required by provider)
+# Only emits assignments that EXIST in Databricks (checked via information_schema SQL).
 extract_tag_assignments() {
-  python3 -c "
-import hcl2, sys
+  python3 - << 'TAEOF'
+import hcl2, sys, os
+
+def _str(v): return (v[0] if isinstance(v, list) else v or '').strip()
+
 with open('abac.auto.tfvars') as f:
     cfg = hcl2.load(f)
+
+desired = []
 for ta in cfg.get('tag_assignments', []):
     etype = ta.get('entity_type', '')
     ename = ta.get('entity_name', '')
     tkey  = ta.get('tag_key', '')
     tval  = ta.get('tag_value', '')
-    if not (etype and ename and tkey and tval):
-        continue
+    if etype and ename and tkey and tval:
+        desired.append((etype, ename, tkey, tval))
+
+if not desired:
+    sys.exit(0)
+
+# Build set of (entity_type, entity_name, tag_key) that actually exist via SQL
+existing = set()
+try:
+    auth, env_cfg = {}, {}
+    for fname in ['auth.auto.tfvars', '../auth.auto.tfvars']:
+        if os.path.exists(fname):
+            with open(fname) as f: auth = hcl2.load(f)
+            break
+    for fname in ['env.auto.tfvars', '../env.auto.tfvars']:
+        if os.path.exists(fname):
+            with open(fname) as f: env_cfg = hcl2.load(f)
+            break
+
+    host          = _str(auth.get('databricks_workspace_host', ''))
+    client_id     = _str(auth.get('databricks_client_id', ''))
+    client_secret = _str(auth.get('databricks_client_secret', ''))
+    wh_id         = _str(env_cfg.get('sql_warehouse_id', ''))
+
+    from databricks.sdk import WorkspaceClient
+    from databricks.sdk.service.sql import StatementState
+    w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
+
+    if not wh_id:
+        for wh in w.warehouses.list():
+            if wh.id:
+                wh_id = wh.id
+                break
+
+    if wh_id:
+        def run_sql(sql):
+            import time
+            r = w.statement_execution.execute_statement(
+                statement=sql, warehouse_id=wh_id, wait_timeout='30s')
+            while r.status and r.status.state in (
+                    StatementState.PENDING, StatementState.RUNNING):
+                time.sleep(1)
+                r = w.statement_execution.get_statement(r.statement_id)
+            rows = []
+            if r.result and r.result.data_array:
+                rows = r.result.data_array
+            return rows
+
+        # column tags: columns  entity_name = catalog.schema.table.column
+        col_rows = run_sql("""
+            SELECT
+              concat(tag_catalog, '.', tag_schema, '.', tag_name, '.', column_name) AS entity_name,
+              tag_key
+            FROM system.information_schema.column_tags
+        """)
+        for row in col_rows:
+            existing.add(('columns', row[0], row[1]))
+
+        # table tags: tables  entity_name = catalog.schema.table
+        tbl_rows = run_sql("""
+            SELECT
+              concat(tag_catalog, '.', tag_schema, '.', tag_name) AS entity_name,
+              tag_key
+            FROM system.information_schema.table_tags
+        """)
+        for row in tbl_rows:
+            existing.add(('tables', row[0], row[1]))
+
+        use_existing_check = True
+    else:
+        use_existing_check = False
+except Exception as e:
+    sys.stderr.write(f'WARNING: tag assignment check failed ({e}), falling back\n')
+    use_existing_check = False
+
+for (etype, ename, tkey, tval) in desired:
+    if use_existing_check and (etype, ename, tkey) not in existing:
+        continue  # does not exist — skip to avoid import error
     tf_key    = f'{etype}|{ename}|{tkey}|{tval}'
-    import_id = f'{etype},{ename},{tkey}'   # comma-separated as provider requires
+    import_id = f'{etype},{ename},{tkey}'
     print(tf_key + '\t' + import_id)
-" 2>/dev/null || true
+TAEOF
 }
 
 # Delete stale entity tag assignments (same entity+tag_key, possibly wrong tag_value)
