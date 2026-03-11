@@ -41,21 +41,24 @@ IMPORT_GROUPS=true
 IMPORT_TAGS=true
 IMPORT_FGAC=true
 IMPORT_TAG_ASSIGNMENTS=true
+IMPORT_GRANTS=true
+IMPORT_WAREHOUSE=true
 
 for arg in "$@"; do
   case "$arg" in
     --dry-run)     DRY_RUN=true ;;
-    --groups-only) IMPORT_TAGS=false; IMPORT_FGAC=false; IMPORT_TAG_ASSIGNMENTS=false ;;
-    --tags-only)   IMPORT_GROUPS=false; IMPORT_FGAC=false; IMPORT_TAG_ASSIGNMENTS=false ;;
-    --fgac-only)   IMPORT_GROUPS=false; IMPORT_TAGS=false; IMPORT_TAG_ASSIGNMENTS=false ;;
-    --tag-assignments-only) IMPORT_GROUPS=false; IMPORT_TAGS=false; IMPORT_FGAC=false ;;
+    --groups-only) IMPORT_TAGS=false; IMPORT_FGAC=false; IMPORT_TAG_ASSIGNMENTS=false; IMPORT_GRANTS=false; IMPORT_WAREHOUSE=false ;;
+    --tags-only)   IMPORT_GROUPS=false; IMPORT_FGAC=false; IMPORT_TAG_ASSIGNMENTS=false; IMPORT_GRANTS=false; IMPORT_WAREHOUSE=false ;;
+    --fgac-only)   IMPORT_GROUPS=false; IMPORT_TAGS=false; IMPORT_TAG_ASSIGNMENTS=false; IMPORT_GRANTS=false; IMPORT_WAREHOUSE=false ;;
+    --tag-assignments-only) IMPORT_GROUPS=false; IMPORT_TAGS=false; IMPORT_FGAC=false; IMPORT_GRANTS=false; IMPORT_WAREHOUSE=false ;;
+    --grants-only) IMPORT_GROUPS=false; IMPORT_TAGS=false; IMPORT_FGAC=false; IMPORT_TAG_ASSIGNMENTS=false; IMPORT_WAREHOUSE=false ;;
     -h|--help)
-      echo "Usage: $0 [--dry-run] [--groups-only|--tags-only|--fgac-only|--tag-assignments-only]"
+      echo "Usage: $0 [--dry-run] [--groups-only|--tags-only|--fgac-only|--tag-assignments-only|--grants-only]"
       exit 0
       ;;
     *)
       echo "Unknown argument: $arg"
-      echo "Usage: $0 [--dry-run] [--groups-only|--tags-only|--fgac-only|--tag-assignments-only]"
+      echo "Usage: $0 [--dry-run] [--groups-only|--tags-only|--fgac-only|--tag-assignments-only|--grants-only]"
       exit 1
       ;;
   esac
@@ -169,12 +172,121 @@ for ta in cfg.get('tag_assignments', []):
     ename = ta.get('entity_name', '')
     tkey = ta.get('tag_key', '')
     tval = ta.get('tag_value', '')
+    if not (etype and ename and tkey and tval):
+        continue
     tf_key = f'{etype}|{ename}|{tkey}|{tval}'
-    import_id = f'{etype},{ename},{tkey}'
-    print(f'{tf_key}|{import_id}')
+    # Import ID format for databricks_entity_tag_assignment: entity_type|entity_name|tag_key
+    import_id = f'{etype}|{ename}|{tkey}'
+    print(f'{tf_key}::{import_id}')
 " 2>/dev/null || {
     echo "WARNING: Could not parse abac.auto.tfvars with python-hcl2." >&2
   }
+}
+
+# Extract catalog-group pairs and client_id for grant imports.
+# Outputs lines in the form: catalog_access|<catalog>|<group>|catalog/<catalog>/<group>
+# or:                         terraform_sp|<catalog>|<client_id>|catalog/<catalog>/<client_id>
+extract_grants() {
+  python3 -c "
+import hcl2, sys, os
+
+def _str(v): return (v[0] if isinstance(v, list) else v or '').strip()
+
+auth = {}
+for fname in ['auth.auto.tfvars', '../auth.auto.tfvars']:
+    if os.path.exists(fname):
+        try:
+            with open(fname) as f:
+                auth = hcl2.load(f)
+        except Exception:
+            pass
+        break
+
+client_id = _str(auth.get('databricks_client_id', '')) or os.environ.get('DATABRICKS_CLIENT_ID', '')
+
+try:
+    with open('abac.auto.tfvars') as f:
+        cfg = hcl2.load(f)
+    groups = list(cfg.get('groups', {}).keys())
+    tag_assignments = cfg.get('tag_assignments', [])
+    fgac_policies   = cfg.get('fgac_policies', [])
+    uc_tables       = cfg.get('uc_tables', []) or []
+except Exception as e:
+    sys.stderr.write(f'WARNING: {e}\n')
+    sys.exit(0)
+
+# Derive catalogs the same way the Terraform module does (from tag_assignments + fgac + uc_tables)
+catalogs = set()
+for ta in tag_assignments:
+    ename = ta.get('entity_name', '')
+    if ename:
+        catalogs.add(ename.split('.')[0])
+for p in fgac_policies:
+    cat = p.get('catalog', '')
+    if cat:
+        catalogs.add(cat)
+for t in uc_tables:
+    if t.count('.') >= 2:
+        catalogs.add(t.split('.')[0])
+
+for catalog in sorted(catalogs):
+    for group in groups:
+        tf_key    = f'{catalog}|{group}'
+        import_id = f'catalog/{catalog}/{group}'
+        print(f'catalog_access|{tf_key}|{import_id}')
+    if client_id:
+        import_id = f'catalog/{catalog}/{client_id}'
+        print(f'terraform_sp|{catalog}|{import_id}')
+" 2>/dev/null || true
+}
+
+# Find the warehouse name used by this data_access env and return its ID.
+# Outputs: <warehouse_id> (single line) or nothing if not found.
+extract_warehouse_id_by_name() {
+  python3 -c "
+import hcl2, sys, os
+
+def _str(v): return (v[0] if isinstance(v, list) else v or '').strip()
+
+# Load env.auto.tfvars to get sql_warehouse_id (skip import if explicitly set)
+env_cfg = {}
+for fname in ['env.auto.tfvars', '../env.auto.tfvars']:
+    if os.path.exists(fname):
+        try:
+            with open(fname) as f:
+                env_cfg = hcl2.load(f)
+        except Exception:
+            pass
+        break
+if _str(env_cfg.get('sql_warehouse_id', '')):
+    # Warehouse explicitly configured — no import needed
+    sys.exit(0)
+
+auth = {}
+for fname in ['auth.auto.tfvars', '../auth.auto.tfvars']:
+    if os.path.exists(fname):
+        try:
+            with open(fname) as f:
+                auth = hcl2.load(f)
+        except Exception:
+            pass
+        break
+
+host          = _str(auth.get('databricks_workspace_host', '')) or os.environ.get('DATABRICKS_HOST', '')
+client_id     = _str(auth.get('databricks_client_id', ''))     or os.environ.get('DATABRICKS_CLIENT_ID', '')
+client_secret = _str(auth.get('databricks_client_secret', '')) or os.environ.get('DATABRICKS_CLIENT_SECRET', '')
+
+# Warehouse name matches var.warehouse_name default in data_access module
+try:
+    from databricks.sdk import WorkspaceClient
+    w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
+    for wh in w.warehouses.list():
+        if wh.name == 'ABAC Governance Warehouse':
+            print(str(wh.id))
+            break
+except Exception as e:
+    sys.stderr.write(f'WARNING: warehouse lookup failed: {e}\n')
+" 2>/dev/null || true
 }
 
 extract_fgac_names() {
@@ -268,12 +380,52 @@ if $IMPORT_TAG_ASSIGNMENTS; then
     if [ -z "$tag_assignment_entries" ]; then
       echo "  No tag assignments found in abac.auto.tfvars."
     else
-      while IFS='|' read -r etype ename tkey tval import_id; do
-        [ -z "$etype" ] && continue
-        tf_key="${etype}|${ename}|${tkey}|${tval}"
+      # Format: <tf_key>::<import_id>  (:: separator avoids conflict with | in values)
+      while IFS='::' read -r tf_key import_id; do
+        [ -z "$tf_key" ] && continue
         run_import "module.data_access.databricks_entity_tag_assignment.assignments[\"$tf_key\"]" "$import_id"
         ((imported++)) || true
       done <<< "$tag_assignment_entries"
+    fi
+  fi
+  echo ""
+fi
+
+if $IMPORT_GRANTS; then
+  echo "--- Grants ---"
+  if [ "$LAYER" != "data_access" ]; then
+    echo "  Skipping grant imports outside envs/<workspace>/data_access"
+  else
+    grant_entries=$(extract_grants)
+    if [ -z "$grant_entries" ]; then
+      echo "  No grants derivable from abac.auto.tfvars."
+    else
+      while IFS='|' read -r grant_type tf_key import_id; do
+        [ -z "$grant_type" ] && continue
+        if [ "$grant_type" = "catalog_access" ]; then
+          run_import "module.data_access.databricks_grant.catalog_access[\"$tf_key\"]" "$import_id"
+        elif [ "$grant_type" = "terraform_sp" ]; then
+          # tf_key is just the catalog name here
+          run_import "module.data_access.databricks_grant.terraform_sp_manage_catalog[\"$tf_key\"]" "$import_id"
+        fi
+        ((imported++)) || true
+      done <<< "$grant_entries"
+    fi
+  fi
+  echo ""
+fi
+
+if $IMPORT_WAREHOUSE; then
+  echo "--- SQL Warehouse ---"
+  if [ "$LAYER" != "data_access" ]; then
+    echo "  Skipping warehouse import outside envs/<workspace>/data_access"
+  else
+    wh_id=$(extract_warehouse_id_by_name)
+    if [ -z "$wh_id" ]; then
+      echo "  No orphaned warehouse found (or sql_warehouse_id is already set)."
+    else
+      run_import "module.data_access.databricks_sql_endpoint.warehouse[0]" "$wh_id"
+      ((imported++)) || true
     fi
   fi
   echo ""

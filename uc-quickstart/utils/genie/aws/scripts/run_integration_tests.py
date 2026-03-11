@@ -235,6 +235,43 @@ def _setup_data(auth_file: Path, *flags: str, warehouse_id: str = "") -> None:
 # Env file helpers
 # ---------------------------------------------------------------------------
 
+def _resolve_warehouse_id(auth_file: Path, warehouse_id: str) -> str:
+    """Return a ready warehouse ID — use the given one, or auto-detect from the workspace.
+
+    Mirrors setup_test_data.py::_get_warehouse so every scenario shares the
+    same warehouse rather than each one creating 'ABAC Governance Warehouse'.
+    """
+    if warehouse_id:
+        return warehouse_id
+    try:
+        import hcl2 as _hcl2
+        from databricks.sdk import WorkspaceClient as _WC
+
+        def _s(v): return (v[0] if isinstance(v, list) else (v or "")).strip()
+
+        with open(auth_file) as f:
+            auth = _hcl2.load(f)
+        host          = _s(auth.get("databricks_workspace_host", ""))
+        client_id     = _s(auth.get("databricks_client_id", ""))
+        client_secret = _s(auth.get("databricks_client_secret", ""))
+        if not host:
+            return ""
+        w = _WC(host=host, client_id=client_id, client_secret=client_secret)
+        warehouses = list(w.warehouses.list())
+        for wh in warehouses:
+            state = str(wh.state)
+            if "RUNNING" in state or "STARTING" in state:
+                print(f"  Auto-selected warehouse: {wh.name} ({wh.id})")
+                return wh.id or ""
+        if warehouses:
+            wh = warehouses[0]
+            print(f"  Auto-selected warehouse (not running): {wh.name} ({wh.id})")
+            return wh.id or ""
+    except Exception as exc:
+        print(f"  WARNING: Could not auto-detect warehouse: {exc}")
+    return ""
+
+
 def _write_env_tfvars(env: str, spaces_hcl: str, warehouse_id: str = "") -> None:
     """Write a minimal env.auto.tfvars for the given env."""
     env_dir = ENVS_DIR / env
@@ -1227,7 +1264,7 @@ def main() -> None:
         return
 
     auth_file   = Path(args.auth_file).resolve()
-    warehouse_id = args.warehouse_id
+    warehouse_id = _resolve_warehouse_id(Path(args.auth_file).resolve(), args.warehouse_id)
     keep_data   = args.keep_data
 
     if not auth_file.exists():

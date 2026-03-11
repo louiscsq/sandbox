@@ -410,7 +410,11 @@ def remove_hcl_top_level_block(text: str, key: str) -> str:
     return text[:start] + text[block_end:]
 
 
-def fetch_tables_from_genie_space(space_id: str, auth_cfg: dict) -> tuple[list[str], dict, str]:
+def fetch_tables_from_genie_space(
+    space_id: str,
+    auth_cfg: dict,
+    quick_check_only: bool = False,
+) -> tuple[list[str], dict, str]:
     """Fetch tables and config from an existing Genie Space via the REST API.
 
     Returns (table_identifiers, genie_config_dict, space_title).
@@ -444,8 +448,10 @@ def fetch_tables_from_genie_space(space_id: str, auth_cfg: dict) -> tuple[list[s
 
     # Genie Spaces may take 1-3 minutes after creation before serialized_space
     # is populated by the Databricks backend (async processing).
-    # Retry with increasing backoff — total budget ~4 minutes.
-    if not serialized:
+    # Skip retries when uc_tables is already provided (quick_check_only=True) —
+    # in that case we only need the space config, not table discovery, and
+    # a missing serialized_space is acceptable (config will just be omitted).
+    if not serialized and not quick_check_only:
         retry_delays = [5, 10, 20, 30, 45, 60, 90]
         for attempt, delay in enumerate(retry_delays, start=1):
             print(f"  Genie Space {space_id} has no serialized_space yet — "
@@ -1248,12 +1254,16 @@ def main():
                 if space_id:
                     # Always query the API for existing spaces to get config.
                     # Tables are also discovered here if uc_tables is not set.
+                    # When uc_tables IS set, use quick_check_only to skip long
+                    # retries — serialized_space is optional in that case.
                     if not space_tables:
                         print(f"\n  Genie Space '{space_name}' has no uc_tables — querying API...")
                     else:
                         print(f"\n  Querying existing Genie Space '{space_name}' for config...")
 
-                    tables, genie_cfg, api_title = fetch_tables_from_genie_space(space_id, auth_cfg)
+                    tables, genie_cfg, api_title = fetch_tables_from_genie_space(
+                        space_id, auth_cfg, quick_check_only=bool(space_tables)
+                    )
 
                     # Use the API title as the canonical name if no name was given
                     effective_name = space_name if space_name != space_id else (api_title or space_id)

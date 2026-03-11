@@ -298,6 +298,10 @@ _apply-layer:
 		echo "=== Auto-importing existing account resources (idempotent apply) ==="; \
 		(cd "$$env_dir" && TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(MODULE_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
 	fi; \
+	if [ "$$layer" = "data_access" ]; then \
+		echo "=== Auto-importing existing data_access resources (idempotent apply) ==="; \
+		(cd "$$env_dir" && TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(MODULE_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
+	fi; \
 	"$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve; \
 	printf "%s\n" "$$current_fingerprint" > "$$fingerprint_file"
 
