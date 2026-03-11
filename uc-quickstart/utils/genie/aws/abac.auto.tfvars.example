@@ -75,71 +75,70 @@ fgac_policies = [
   # }
 ]
 
-# === Genie Space Config (workspace-owned after promote) ===
-# Title and description for the auto-created Genie Space.
-# genie_space_title       = "Financial & Clinical Analytics"
-# genie_space_description = "Explore transaction data, patient encounters, and compliance metrics with natural language."
-
-# Sample questions shown as conversation starters in the Genie Space UI.
-# genie_sample_questions = [
-#   "What is the total revenue by region for last quarter?",
-#   "Show the top 10 customers by transaction volume",
-#   "Which accounts have been flagged for AML review?",
-# ]
-
-# Domain-specific guidance for the Genie LLM (include business defaults).
-# genie_instructions = "When asked about 'customers' without a status qualifier, default to active customers (CustomerStatus = 'Active'). 'Last month' means the previous calendar month. Round monetary values to 2 decimal places."
-
-# Ground-truth SQL for evaluating Genie accuracy.
-# Each question must be unambiguous — include explicit qualifiers so question and SQL agree on scope.
-# genie_benchmarks = [
-#   {
-#     question = "What is the total amount of completed transactions?"
-#     sql      = "SELECT SUM(Amount) as total_amount FROM catalog.schema.transactions WHERE TransactionStatus = 'Completed'"
-#   },
-# ]
-
-# Default WHERE clauses that guide Genie's SQL generation.
-# genie_sql_filters = [
-#   {
-#     sql          = "customers.CustomerStatus = 'Active'"
-#     display_name = "active customers"
-#     comment      = "Only include customers with Active status"
-#     instruction  = "Apply when the user asks about customers without specifying a status"
-#   },
-# ]
-
-# Standard aggregate metrics for Genie to use.
-# genie_sql_measures = [
-#   {
-#     alias        = "total_revenue"
-#     sql          = "SUM(transactions.Amount)"
-#     display_name = "total revenue"
-#     comment      = "Sum of all transaction amounts"
-#     instruction  = "Use for revenue, total amount, or sales calculations"
-#   },
-# ]
-
-# Computed dimensions/columns for Genie to use.
-# genie_sql_expressions = [
-#   {
-#     alias        = "transaction_year"
-#     sql          = "YEAR(transactions.TransactionDate)"
-#     display_name = "transaction year"
-#     comment      = "Extracts year from transaction date"
-#     instruction  = "Use for year-over-year analysis of transactions"
-#   },
-# ]
-
-# Join relationships between tables.
-# genie_join_specs = [
-#   {
-#     left_table  = "catalog.schema.accounts"
-#     left_alias  = "accounts"
-#     right_table = "catalog.schema.customers"
-#     right_alias = "customers"
-#     sql         = "accounts.CustomerID = customers.CustomerID"
-#     comment     = "Join accounts to customers on CustomerID"
-#     instruction = "Use when you need customer details for account queries"
-#   },
-# ]
+# === Genie Space Configs (workspace-owned after promote) ===
+# One entry per Genie Space, keyed by the same `key` used in env.auto.tfvars genie_spaces.
+# All table names in SQL must be fully qualified: catalog.schema.table.
+#
+# The key must exactly match the `name` field in env.auto.tfvars genie_spaces.
+# The `title` field is optional — if omitted, the space name is used as the title.
+# genie_space_configs = {
+#   "Financial & Clinical Analytics" = {
+#     description = "Explore transaction data, patient encounters, and compliance metrics."
+#
+#     sample_questions = [
+#       "What is the total revenue by region for last quarter?",
+#       "Show the top 10 customers by transaction volume",
+#       "Which accounts have been flagged for AML review?",
+#     ]
+#
+#     instructions = "When asked about 'customers' without a status qualifier, default to active customers (CustomerStatus = 'Active'). 'Last month' means the previous calendar month. Round monetary values to 2 decimal places."
+#
+#     benchmarks = [
+#       {
+#         question = "What is the total amount of completed transactions?"
+#         sql      = "SELECT SUM(Amount) as total_amount FROM catalog.schema.transactions WHERE TransactionStatus = 'Completed'"
+#       },
+#     ]
+#
+#     sql_filters = [
+#       {
+#         sql          = "customers.CustomerStatus = 'Active'"
+#         display_name = "active customers"
+#         comment      = "Only include customers with Active status"
+#         instruction  = "Apply when the user asks about customers without specifying a status"
+#       },
+#     ]
+#
+#     sql_measures = [
+#       {
+#         alias        = "total_revenue"
+#         sql          = "SUM(transactions.Amount)"
+#         display_name = "total revenue"
+#         comment      = "Sum of all transaction amounts"
+#         instruction  = "Use for revenue, total amount, or sales calculations"
+#       },
+#     ]
+#
+#     sql_expressions = [
+#       {
+#         alias        = "transaction_year"
+#         sql          = "YEAR(transactions.TransactionDate)"
+#         display_name = "transaction year"
+#         comment      = "Extracts year from transaction date"
+#         instruction  = "Use for year-over-year analysis of transactions"
+#       },
+#     ]
+#
+#     join_specs = [
+#       {
+#         left_table  = "catalog.schema.accounts"
+#         left_alias  = "accounts"
+#         right_table = "catalog.schema.customers"
+#         right_alias = "customers"
+#         sql         = "accounts.CustomerID = customers.CustomerID"
+#         comment     = "Join accounts to customers on CustomerID"
+#         instruction = "Use when you need customer details for account queries"
+#       },
+#     ]
+#   }
+# }

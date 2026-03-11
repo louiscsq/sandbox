@@ -25,17 +25,17 @@ output "group_entitlements" {
 }
 
 output "sql_warehouse_id" {
-  description = "Effective SQL warehouse ID (provided or auto-created)."
-  value       = local.effective_warehouse_id
+  description = "Effective shared SQL warehouse ID (provided or auto-created)."
+  value       = local.shared_warehouse_id
 }
 
 output "genie_space_acls_applied" {
-  description = "Whether Genie Space ACLs were applied."
+  description = "Whether Genie Space ACLs were applied to any space."
   value       = length(null_resource.genie_space_acls) > 0 || length(null_resource.genie_space_acls_created) > 0
 }
 
 output "genie_space_acls_groups" {
-  description = "Groups granted CAN_RUN on the Genie Space."
+  description = "Groups granted CAN_RUN on Genie Spaces."
   value = (
     length(null_resource.genie_space_acls) > 0 || length(null_resource.genie_space_acls_created) > 0
     ? keys(var.groups)
@@ -43,12 +43,12 @@ output "genie_space_acls_groups" {
   )
 }
 
-output "genie_space_created" {
-  description = "Whether a new Genie Space was auto-created."
-  value       = length(null_resource.genie_space_create) > 0
+output "genie_spaces_created" {
+  description = "Set of Genie Space keys that were auto-created (genie_space_id was empty)."
+  value       = keys(null_resource.genie_space_create)
 }
 
 output "genie_groups_csv" {
   description = "Comma-separated group names for Genie ACL calls."
-  value       = join(",", keys(var.groups))
+  value       = local.genie_groups_csv
 }

@@ -7,323 +7,333 @@
 # ============================================================================
 
 groups = {
-  Junior_Analyst = {
-    description = "Entry-level analysts with limited PII/PHI access"
-  }
-  Senior_Analyst = {
-    description = "Experienced analysts with partial PII access for investigations"
+  Finance_Analyst = {
+    description = "Standard financial analysts - can see aggregated data with masked PII"
   }
   Compliance_Officer = {
-    description = "Full access to AML alerts and audit logs, masked PCI data"
+    description = "AML/BSA compliance staff - can see flagged transactions and risk scores"
+  }
+  PCI_Admin = {
+    description = "PCI-authorized personnel - can see last 4 digits of card numbers"
   }
   Clinical_Staff = {
-    description = "Healthcare workers with full PHI access"
+    description = "Healthcare providers - full access to patient clinical data"
   }
-  Admin = {
-    description = "System administrators with full data access"
+  Billing_Admin = {
+    description = "Healthcare billing - can see encounter amounts but masked PHI"
+  }
+  Data_Admin = {
+    description = "System administrators - full access for operational purposes"
   }
 }
 
 tag_assignments = [
   {
-    entity_type = "tables"
-    entity_name = "louis_sydney.clinical.encounters"
-    tag_key = "data_region"
-    tag_value = "us"
-  },
-  {
     entity_type = "columns"
-    entity_name = "louis_sydney.clinical.encounters.PatientID"
-    tag_key = "phi_level"
-    tag_value = "restricted"
-  },
-  {
-    entity_type = "columns"
-    entity_name = "louis_sydney.clinical.encounters.DiagnosisCode"
-    tag_key = "phi_level"
-    tag_value = "masked_diagnosis"
-  },
-  {
-    entity_type = "columns"
-    entity_name = "louis_sydney.clinical.encounters.DiagnosisDesc"
-    tag_key = "phi_level"
-    tag_value = "masked_notes"
-  },
-  {
-    entity_type = "columns"
-    entity_name = "louis_sydney.clinical.encounters.TreatmentNotes"
-    tag_key = "phi_level"
-    tag_value = "masked_notes"
-  },
-  {
-    entity_type = "columns"
-    entity_name = "louis_sydney.clinical.encounters.AttendingDoc"
-    tag_key = "pii_level"
-    tag_value = "masked_name"
-  },
-  {
-    entity_type = "tables"
-    entity_name = "louis_sydney.finance.customers"
-    tag_key = "data_region"
-    tag_value = "global"
-  },
-  {
-    entity_type = "tables"
-    entity_name = "louis_sydney.finance.tradingpositions"
-    tag_key = "trading_level"
-    tag_value = "restricted"
-  },
-  {
-    entity_type = "tables"
-    entity_name = "louis_sydney.finance.auditlogs"
-    tag_key = "audit_level"
-    tag_value = "restricted"
-  },
-  {
-    entity_type = "columns"
-    entity_name = "louis_sydney.finance.customers.FirstName"
+    entity_name = "dev_fin.finance.customers.first_name"
     tag_key = "pii_level"
     tag_value = "masked_name"
   },
   {
     entity_type = "columns"
-    entity_name = "louis_sydney.finance.customers.LastName"
+    entity_name = "dev_fin.finance.customers.last_name"
     tag_key = "pii_level"
     tag_value = "masked_name"
   },
   {
     entity_type = "columns"
-    entity_name = "louis_sydney.finance.customers.Email"
-    tag_key = "pii_level"
-    tag_value = "masked_email"
-  },
-  {
-    entity_type = "columns"
-    entity_name = "louis_sydney.finance.customers.SSN"
+    entity_name = "dev_fin.finance.customers.ssn"
     tag_key = "pii_level"
     tag_value = "masked_ssn"
   },
   {
     entity_type = "columns"
-    entity_name = "louis_sydney.finance.customers.Address"
+    entity_name = "dev_fin.finance.customers.email"
     tag_key = "pii_level"
-    tag_value = "restricted"
+    tag_value = "masked_email"
   },
   {
     entity_type = "columns"
-    entity_name = "louis_sydney.finance.customers.DateOfBirth"
+    entity_name = "dev_fin.finance.customers.phone"
     tag_key = "pii_level"
-    tag_value = "restricted"
+    tag_value = "masked_phone"
   },
   {
     entity_type = "columns"
-    entity_name = "louis_sydney.finance.creditcards.CardNumber"
+    entity_name = "dev_fin.finance.customers.address"
+    tag_key = "pii_level"
+    tag_value = "masked_address"
+  },
+  {
+    entity_type = "columns"
+    entity_name = "dev_fin.finance.credit_cards.card_number"
     tag_key = "pci_level"
-    tag_value = "masked_card_full"
+    tag_value = "masked_card_last4"
   },
   {
     entity_type = "columns"
-    entity_name = "louis_sydney.finance.creditcards.CVV"
+    entity_name = "dev_fin.finance.credit_cards.cvv"
     tag_key = "pci_level"
     tag_value = "restricted"
   },
   {
     entity_type = "columns"
-    entity_name = "louis_sydney.finance.accounts.AccountID"
-    tag_key = "pii_level"
+    entity_name = "dev_fin.finance.transactions.amount"
+    tag_key = "financial_sensitivity"
+    tag_value = "rounded_amounts"
+  },
+  {
+    entity_type = "tables"
+    entity_name = "dev_fin.finance.transactions"
+    tag_key = "compliance_scope"
+    tag_value = "aml_flagged"
+  },
+  {
+    entity_type = "columns"
+    entity_name = "dev_clinical.clinical.patients.first_name"
+    tag_key = "phi_level"
     tag_value = "masked_name"
   },
   {
     entity_type = "columns"
-    entity_name = "louis_sydney.finance.amlalerts.InvestigationNotes"
-    tag_key = "aml_level"
-    tag_value = "investigation_notes"
-  },
-  {
-    entity_type = "columns"
-    entity_name = "louis_sydney.finance.amlalerts.AssignedInvestigator"
-    tag_key = "pii_level"
+    entity_name = "dev_clinical.clinical.patients.last_name"
+    tag_key = "phi_level"
     tag_value = "masked_name"
   },
   {
     entity_type = "columns"
-    entity_name = "louis_sydney.finance.transactions.Amount"
-    tag_key = "aml_level"
-    tag_value = "masked_amounts"
+    entity_name = "dev_clinical.clinical.patients.ssn"
+    tag_key = "phi_level"
+    tag_value = "masked_ssn"
   },
   {
     entity_type = "columns"
-    entity_name = "louis_sydney.finance.accounts.Balance"
-    tag_key = "aml_level"
-    tag_value = "masked_amounts"
+    entity_name = "dev_clinical.clinical.patients.email"
+    tag_key = "phi_level"
+    tag_value = "masked_email"
   },
   {
     entity_type = "columns"
-    entity_name = "louis_sydney.finance.customerinteractions.InteractionNotes"
-    tag_key = "pii_level"
-    tag_value = "restricted"
+    entity_name = "dev_clinical.clinical.patients.phone"
+    tag_key = "phi_level"
+    tag_value = "masked_phone"
   },
   {
     entity_type = "columns"
-    entity_name = "louis_sydney.finance.customerinteractions.AgentID"
-    tag_key = "pii_level"
-    tag_value = "masked_name"
+    entity_name = "dev_clinical.clinical.patients.address"
+    tag_key = "phi_level"
+    tag_value = "masked_address"
+  },
+  {
+    entity_type = "columns"
+    entity_name = "dev_clinical.clinical.encounters.diagnosis_code"
+    tag_key = "phi_level"
+    tag_value = "masked_diagnosis"
+  },
+  {
+    entity_type = "columns"
+    entity_name = "dev_clinical.clinical.encounters.diagnosis_desc"
+    tag_key = "phi_level"
+    tag_value = "restricted_notes"
+  },
+  {
+    entity_type = "columns"
+    entity_name = "dev_clinical.clinical.encounters.treatment_notes"
+    tag_key = "phi_level"
+    tag_value = "restricted_notes"
   },
 ]
 
 fgac_policies = [
   {
-    name = "mask_diagnosis_codes_junior"
+    name = "mask_customer_names_finance_analyst"
     policy_type = "POLICY_TYPE_COLUMN_MASK"
-    catalog = "louis_sydney"
-    to_principals = ["Junior_Analyst", "Senior_Analyst"]
-    comment = "Mask diagnosis codes to category level for non-clinical staff"
-    match_condition = "hasTagValue('phi_level', 'masked_diagnosis')"
-    match_alias = "diagnosis"
-    function_name = "mask_diagnosis_code"
-    function_catalog = "louis_sydney"
-    function_schema = "clinical"
-  },
-  {
-    name = "mask_clinical_notes_junior"
-    policy_type = "POLICY_TYPE_COLUMN_MASK"
-    catalog = "louis_sydney"
-    to_principals = ["Junior_Analyst", "Senior_Analyst"]
-    comment = "Redact clinical notes and descriptions for non-clinical staff"
-    match_condition = "hasTagValue('phi_level', 'masked_notes')"
-    match_alias = "notes"
-    function_name = "mask_redact"
-    function_catalog = "louis_sydney"
-    function_schema = "clinical"
-  },
-  {
-    name = "mask_phi_restricted_junior"
-    policy_type = "POLICY_TYPE_COLUMN_MASK"
-    catalog = "louis_sydney"
-    to_principals = ["Junior_Analyst", "Senior_Analyst", "Compliance_Officer"]
-    comment = "Hide highly sensitive PHI from non-clinical roles"
-    match_condition = "hasTagValue('phi_level', 'restricted')"
-    match_alias = "phi_data"
-    function_name = "mask_redact"
-    function_catalog = "louis_sydney"
-    function_schema = "clinical"
-  },
-  {
-    name = "mask_names_junior"
-    policy_type = "POLICY_TYPE_COLUMN_MASK"
-    catalog = "louis_sydney"
-    to_principals = ["Junior_Analyst"]
-    comment = "Partially mask names and identifiers for junior analysts"
+    catalog = "dev_fin"
+    to_principals = ["Finance_Analyst", "Billing_Admin"]
+    comment = "Mask customer names for financial analysts"
     match_condition = "hasTagValue('pii_level', 'masked_name')"
-    match_alias = "names"
+    match_alias = "masked_name"
     function_name = "mask_pii_partial"
-    function_catalog = "louis_sydney"
+    function_catalog = "dev_fin"
     function_schema = "finance"
   },
   {
-    name = "mask_ssn_non_compliance"
+    name = "mask_customer_ssn_finance_analyst"
     policy_type = "POLICY_TYPE_COLUMN_MASK"
-    catalog = "louis_sydney"
-    to_principals = ["Junior_Analyst", "Senior_Analyst"]
-    comment = "Mask SSN for non-compliance roles"
+    catalog = "dev_fin"
+    to_principals = ["Finance_Analyst", "Billing_Admin"]
+    comment = "Mask customer SSN for financial analysts"
     match_condition = "hasTagValue('pii_level', 'masked_ssn')"
-    match_alias = "ssn"
+    match_alias = "masked_ssn"
     function_name = "mask_ssn"
-    function_catalog = "louis_sydney"
+    function_catalog = "dev_fin"
     function_schema = "finance"
   },
   {
-    name = "mask_email_junior"
+    name = "mask_customer_email_finance_analyst"
     policy_type = "POLICY_TYPE_COLUMN_MASK"
-    catalog = "louis_sydney"
-    to_principals = ["Junior_Analyst"]
-    comment = "Mask email local parts for junior analysts"
+    catalog = "dev_fin"
+    to_principals = ["Finance_Analyst", "Billing_Admin"]
+    comment = "Mask customer email for financial analysts"
     match_condition = "hasTagValue('pii_level', 'masked_email')"
-    match_alias = "email"
+    match_alias = "masked_email"
     function_name = "mask_email"
-    function_catalog = "louis_sydney"
+    function_catalog = "dev_fin"
     function_schema = "finance"
   },
   {
-    name = "mask_pii_restricted_all"
+    name = "mask_customer_phone_finance_analyst"
     policy_type = "POLICY_TYPE_COLUMN_MASK"
-    catalog = "louis_sydney"
-    to_principals = ["Junior_Analyst", "Senior_Analyst", "Clinical_Staff"]
-    comment = "Hide highly sensitive PII from non-compliance roles"
-    match_condition = "hasTagValue('pii_level', 'restricted')"
-    match_alias = "pii_data"
+    catalog = "dev_fin"
+    to_principals = ["Finance_Analyst", "Billing_Admin"]
+    comment = "Mask customer phone for financial analysts"
+    match_condition = "hasTagValue('pii_level', 'masked_phone')"
+    match_alias = "masked_phone"
+    function_name = "mask_phone"
+    function_catalog = "dev_fin"
+    function_schema = "finance"
+  },
+  {
+    name = "mask_customer_address_finance_analyst"
+    policy_type = "POLICY_TYPE_COLUMN_MASK"
+    catalog = "dev_fin"
+    to_principals = ["Finance_Analyst", "Billing_Admin"]
+    comment = "Mask customer address for financial analysts"
+    match_condition = "hasTagValue('pii_level', 'masked_address')"
+    match_alias = "masked_address"
     function_name = "mask_redact"
-    function_catalog = "louis_sydney"
+    function_catalog = "dev_fin"
     function_schema = "finance"
   },
   {
-    name = "mask_card_numbers_full"
+    name = "mask_card_number_last4"
     policy_type = "POLICY_TYPE_COLUMN_MASK"
-    catalog = "louis_sydney"
-    to_principals = ["Junior_Analyst", "Senior_Analyst", "Compliance_Officer", "Clinical_Staff"]
-    comment = "Fully mask credit card numbers for PCI-DSS compliance"
-    match_condition = "hasTagValue('pci_level', 'masked_card_full')"
-    match_alias = "card_full"
-    function_name = "mask_credit_card_full"
-    function_catalog = "louis_sydney"
+    catalog = "dev_fin"
+    to_principals = ["Finance_Analyst", "Compliance_Officer"]
+    comment = "Show last 4 digits of card numbers for authorized roles"
+    match_condition = "hasTagValue('pci_level', 'masked_card_last4')"
+    match_alias = "masked_card_last4"
+    function_name = "mask_credit_card_last4"
+    function_catalog = "dev_fin"
     function_schema = "finance"
   },
   {
-    name = "mask_pci_restricted"
+    name = "mask_cvv_restricted"
     policy_type = "POLICY_TYPE_COLUMN_MASK"
-    catalog = "louis_sydney"
-    to_principals = ["Junior_Analyst", "Senior_Analyst", "Compliance_Officer", "Clinical_Staff"]
-    comment = "Hide CVV and other restricted PCI data"
+    catalog = "dev_fin"
+    to_principals = ["Finance_Analyst", "Compliance_Officer", "Billing_Admin"]
+    comment = "Fully redact CVV for all non-PCI roles"
     match_condition = "hasTagValue('pci_level', 'restricted')"
-    match_alias = "pci_data"
-    function_name = "mask_nullify"
-    function_catalog = "louis_sydney"
-    function_schema = "finance"
-  },
-  {
-    name = "mask_amounts_junior"
-    policy_type = "POLICY_TYPE_COLUMN_MASK"
-    catalog = "louis_sydney"
-    to_principals = ["Junior_Analyst"]
-    comment = "Round amounts for junior analysts to protect investigation details"
-    match_condition = "hasTagValue('aml_level', 'masked_amounts')"
-    match_alias = "amounts"
-    function_name = "mask_amount_rounded"
-    function_catalog = "louis_sydney"
-    function_schema = "finance"
-  },
-  {
-    name = "mask_investigation_notes"
-    policy_type = "POLICY_TYPE_COLUMN_MASK"
-    catalog = "louis_sydney"
-    to_principals = ["Junior_Analyst", "Senior_Analyst"]
-    comment = "Hide AML investigation notes from non-compliance staff"
-    match_condition = "hasTagValue('aml_level', 'investigation_notes')"
-    match_alias = "investigation"
+    match_alias = "pci_restricted"
     function_name = "mask_redact"
-    function_catalog = "louis_sydney"
+    function_catalog = "dev_fin"
     function_schema = "finance"
   },
   {
-    name = "filter_trading_data_access"
-    policy_type = "POLICY_TYPE_ROW_FILTER"
-    catalog = "louis_sydney"
-    to_principals = ["Junior_Analyst", "Senior_Analyst"]
-    comment = "Restrict trading data access outside market hours for Chinese wall compliance"
-    when_condition = "hasTagValue('trading_level', 'restricted')"
-    function_name = "filter_trading_hours"
-    function_catalog = "louis_sydney"
+    name = "mask_transaction_amounts"
+    policy_type = "POLICY_TYPE_COLUMN_MASK"
+    catalog = "dev_fin"
+    to_principals = ["Finance_Analyst"]
+    comment = "Round transaction amounts for privacy"
+    match_condition = "hasTagValue('financial_sensitivity', 'rounded_amounts')"
+    match_alias = "rounded_amounts"
+    function_name = "mask_amount_rounded"
+    function_catalog = "dev_fin"
     function_schema = "finance"
   },
   {
-    name = "filter_audit_data_access"
+    name = "filter_aml_transactions"
     policy_type = "POLICY_TYPE_ROW_FILTER"
-    catalog = "louis_sydney"
-    to_principals = ["Junior_Analyst", "Senior_Analyst"]
-    comment = "Time-limited access to audit logs for SOX compliance"
-    when_condition = "hasTagValue('audit_level', 'restricted')"
-    function_name = "filter_audit_expiry"
-    function_catalog = "louis_sydney"
+    catalog = "dev_fin"
+    to_principals = ["Compliance_Officer"]
+    comment = "Show AML-flagged transactions to compliance officers"
+    when_condition = "hasTagValue('compliance_scope', 'aml_flagged')"
+    function_name = "filter_aml_compliance"
+    function_catalog = "dev_fin"
     function_schema = "finance"
+  },
+  {
+    name = "mask_patient_names_billing"
+    policy_type = "POLICY_TYPE_COLUMN_MASK"
+    catalog = "dev_clinical"
+    to_principals = ["Billing_Admin"]
+    comment = "Mask patient names for billing staff"
+    match_condition = "hasTagValue('phi_level', 'masked_name')"
+    match_alias = "phi_masked_name"
+    function_name = "mask_pii_partial"
+    function_catalog = "dev_clinical"
+    function_schema = "clinical"
+  },
+  {
+    name = "mask_patient_ssn_billing"
+    policy_type = "POLICY_TYPE_COLUMN_MASK"
+    catalog = "dev_clinical"
+    to_principals = ["Billing_Admin"]
+    comment = "Mask patient SSN for billing staff"
+    match_condition = "hasTagValue('phi_level', 'masked_ssn')"
+    match_alias = "phi_masked_ssn"
+    function_name = "mask_ssn"
+    function_catalog = "dev_clinical"
+    function_schema = "clinical"
+  },
+  {
+    name = "mask_patient_email_billing"
+    policy_type = "POLICY_TYPE_COLUMN_MASK"
+    catalog = "dev_clinical"
+    to_principals = ["Billing_Admin"]
+    comment = "Mask patient email for billing staff"
+    match_condition = "hasTagValue('phi_level', 'masked_email')"
+    match_alias = "phi_masked_email"
+    function_name = "mask_email"
+    function_catalog = "dev_clinical"
+    function_schema = "clinical"
+  },
+  {
+    name = "mask_patient_phone_billing"
+    policy_type = "POLICY_TYPE_COLUMN_MASK"
+    catalog = "dev_clinical"
+    to_principals = ["Billing_Admin"]
+    comment = "Mask patient phone for billing staff"
+    match_condition = "hasTagValue('phi_level', 'masked_phone')"
+    match_alias = "phi_masked_phone"
+    function_name = "mask_phone"
+    function_catalog = "dev_clinical"
+    function_schema = "clinical"
+  },
+  {
+    name = "mask_patient_address_billing"
+    policy_type = "POLICY_TYPE_COLUMN_MASK"
+    catalog = "dev_clinical"
+    to_principals = ["Billing_Admin"]
+    comment = "Mask patient address for billing staff"
+    match_condition = "hasTagValue('phi_level', 'masked_address')"
+    match_alias = "phi_masked_address"
+    function_name = "mask_redact"
+    function_catalog = "dev_clinical"
+    function_schema = "clinical"
+  },
+  {
+    name = "mask_diagnosis_codes_billing"
+    policy_type = "POLICY_TYPE_COLUMN_MASK"
+    catalog = "dev_clinical"
+    to_principals = ["Billing_Admin"]
+    comment = "Show diagnosis category only for billing staff"
+    match_condition = "hasTagValue('phi_level', 'masked_diagnosis')"
+    match_alias = "phi_masked_diagnosis"
+    function_name = "mask_diagnosis_code"
+    function_catalog = "dev_clinical"
+    function_schema = "clinical"
+  },
+  {
+    name = "mask_clinical_notes_billing"
+    policy_type = "POLICY_TYPE_COLUMN_MASK"
+    catalog = "dev_clinical"
+    to_principals = ["Billing_Admin"]
+    comment = "Redact clinical notes for billing staff"
+    match_condition = "hasTagValue('phi_level', 'restricted_notes')"
+    match_alias = "phi_restricted_notes"
+    function_name = "mask_redact"
+    function_catalog = "dev_clinical"
+    function_schema = "clinical"
   },
 ]

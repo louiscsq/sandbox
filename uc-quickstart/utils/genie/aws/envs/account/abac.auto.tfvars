@@ -40,28 +40,43 @@ groups = {
   Admin = {
     description = "System administrators with unrestricted access to all data"
   }
+  Finance_Admin = {
+    description = "Finance administrators with full PCI/PII access for operations"
+  }
+  Finance_Analyst = {
+    description = "Standard financial analysts - can see aggregated data with masked PII"
+  }
+  PCI_Admin = {
+    description = "PCI-authorized personnel - can see last 4 digits of card numbers"
+  }
+  Billing_Admin = {
+    description = "Healthcare billing - can see encounter amounts but masked PHI"
+  }
+  Data_Admin = {
+    description = "System administrators - full access for operational purposes"
+  }
 }
 
 tag_policies = [
   {
     key = "phi_level"
-    description = "Protected Health Information sensitivity"
-    values = ["public", "masked_diagnosis", "masked_notes", "restricted", "full_phi"]
+    description = "Protected health information sensitivity"
+    values = ["public", "masked_name", "masked_ssn", "masked_email", "masked_phone", "masked_address", "masked_diagnosis", "restricted_notes", "full_phi"]
   },
   {
     key = "pii_level"
-    description = "Personal Identifiable Information sensitivity"
-    values = ["public", "masked_name", "masked_ssn", "masked_email", "restricted", "highly_sensitive"]
+    description = "Personal information sensitivity"
+    values = ["public", "masked_name", "masked_ssn", "masked_email", "masked_phone", "masked_address", "highly_sensitive"]
   },
   {
     key = "pci_level"
-    description = "Payment Card Industry data sensitivity"
+    description = "Payment card industry sensitivity"
     values = ["public", "masked_card_full", "masked_card_last4", "restricted"]
   },
   {
     key = "financial_level"
-    description = "Financial data sensitivity for trading and compliance"
-    values = ["public", "masked_account", "masked_amount", "restricted"]
+    description = "Financial data sensitivity"
+    values = ["public", "masked_amounts", "masked_accounts", "restricted"]
   },
   {
     key = "regional_access"
@@ -75,8 +90,8 @@ tag_policies = [
   },
   {
     key = "compliance_level"
-    description = "Compliance and audit data sensitivity"
-    values = ["public", "investigation_notes", "restricted"]
+    description = "Regulatory compliance sensitivity"
+    values = ["public", "audit_restricted", "investigation_notes", "restricted"]
   },
   {
     key = "region_access"
@@ -95,27 +110,37 @@ tag_policies = [
   },
   {
     key = "aml_level"
-    description = "Anti-Money Laundering investigation sensitivity"
-    values = ["public", "masked_amounts", "investigation_notes", "restricted"]
+    description = "Anti-Money Laundering data sensitivity"
+    values = ["public", "masked_amounts", "redacted", "restricted"]
   },
   {
     key = "audit_level"
     description = "Audit and compliance data sensitivity"
-    values = ["public", "restricted"]
+    values = ["public", "time_limited", "restricted"]
   },
   {
     key = "trading_level"
-    description = "Trading data for Chinese wall compliance"
-    values = ["public", "restricted"]
+    description = "Trading data sensitivity for Chinese walls"
+    values = ["public", "trading_restricted", "restricted"]
   },
   {
     key = "data_region"
     description = "Data residency and regional access control"
-    values = ["us", "eu", "global"]
+    values = ["global", "us_only", "eu_only"]
   },
   {
     key = "financial_sensitivity"
-    description = "Financial data sensitivity levels"
-    values = ["public", "masked_account", "masked_amount", "restricted"]
+    description = "Financial data sensitivity"
+    values = ["public", "rounded_amounts", "restricted"]
+  },
+  {
+    key = "data_residency"
+    description = "Data residency and regional filtering"
+    values = ["global", "us_only", "eu_only"]
+  },
+  {
+    key = "compliance_scope"
+    description = "Regulatory compliance requirements"
+    values = ["public", "aml_flagged", "pci_restricted", "phi_restricted"]
   },
 ]

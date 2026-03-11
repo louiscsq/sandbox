@@ -30,6 +30,9 @@ DATA_ACCESS_KEYS = (
 
 WORKSPACE_KEYS = (
     "groups",
+    # New multi-space format.
+    "genie_space_configs",
+    # Legacy single-space keys (kept for backward compatibility with old generated configs).
     "genie_space_title",
     "genie_space_description",
     "genie_sample_questions",

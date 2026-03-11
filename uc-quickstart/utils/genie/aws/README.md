@@ -1,105 +1,83 @@
 # GenieRails
 
-Put Genie onboarding on rails — with built-in guardrails. This quickstart generates ABAC governance, masking functions, and an optional Genie Space from a small set of input files so you can get business users into Genie quickly without editing Terraform.
-
-## What This Quickstart Automates
-
-- AI-generated ABAC config from Unity Catalog table DDLs
-- Account-level groups and optional group membership
-- Workspace onboarding and Databricks One entitlements
-- Unity Catalog access grants for exposed data
-- Tag policies, tag assignments, and FGAC policies
-- Masking functions for column masks and row filters
-- Optional Genie Space creation, configuration, and ACLs
-- Optional serverless SQL warehouse creation
+Put Genie onboarding on rails — with built-in guardrails. GenieRails generates ABAC governance, masking functions, and Genie Spaces from a small set of input files so you can get business users into Genie quickly without editing Terraform.
 
 ## Prerequisites
 
 - Tables must already exist in Unity Catalog before running `make generate`
-- Use a Databricks service principal with these roles:
+- A Databricks service principal with these roles:
 
 | Role | Why it's needed |
 | ---- | --------------- |
-| **Account Admin** | Create account-level groups, assign groups to workspaces, manage group membership |
-| **Workspace Admin** | Grant entitlements, create or manage warehouses, Genie Spaces, and Genie permissions |
+| **Account Admin** | Create groups, assign groups to workspaces, manage group membership |
+| **Workspace Admin** | Grant entitlements, create warehouses, manage Genie Spaces and permissions |
 | **Metastore Admin** | Create tag policies, FGAC policies, grants, and masking functions |
 
 ## Quickstart
 
-Start here. Bare commands default to `ENV=dev`.
-
 ```bash
 make setup
-vi envs/dev/auth.auto.tfvars
-vi envs/dev/env.auto.tfvars
+vi envs/dev/auth.auto.tfvars      # service principal credentials
+vi envs/dev/env.auto.tfvars       # your tables and Genie Space name
 
 make generate
-vi envs/dev/generated/abac.auto.tfvars
-vi envs/dev/generated/masking_functions.sql
+vi envs/dev/generated/abac.auto.tfvars       # review AI-generated groups, policies, Genie config
+vi envs/dev/generated/masking_functions.sql  # review AI-generated masking and row-filter functions
 make validate-generated
 make apply
 ```
 
-What you do in each step:
+### `env.auto.tfvars` — minimal example
 
-- `auth.auto.tfvars`: enter the service principal credentials for the target workspace
-- `env.auto.tfvars`: choose the catalog and schema-relative tables to govern
-- `generated/abac.auto.tfvars`: review and iterate on generated groups, policies, and Genie config
-- `generated/masking_functions.sql`: review and iterate on generated masking and row-filter functions
-- `make apply`: split and apply the account, data-access, and workspace layers
+```hcl
+genie_spaces = [
+  {
+    name      = "Sales Analytics"
+    uc_tables = [
+      "dev_catalog.sales.orders",
+      "dev_catalog.sales.customers",
+      "dev_catalog.finance.*",   # wildcard expands all tables in the schema
+    ]
+  },
+]
+```
 
-## Next Step: Add Another Environment
+All table names must be fully qualified (`catalog.schema.table` or `catalog.schema.*`). The `name` becomes the Genie Space title in the UI. A serverless SQL warehouse is created automatically — see [Flows](docs/flows.md) for warehouse and multi-space options.
 
-After `dev` is working, choose one path:
+### What `make apply` does
 
-### 1. Promote `dev` to `prod`
+1. Applies account-level groups and optional group membership
+2. Applies UC grants, tag policies, FGAC policies, and masking functions
+3. Creates the Genie Space, configures it, and sets group permissions
 
-Use this when `prod` should reuse the same schema-relative tables and governance design as `dev`, but point at a different catalog.
+## Next Steps
+
+**Promote `dev` to `prod`:**
 
 ```bash
-make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG=prod_catalog
+make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_catalog=prod_catalog"
 vi envs/prod/auth.auto.tfvars
-# Enter the prod workspace credentials.
-#
 make apply ENV=prod
 ```
 
-### 2. Create a separate environment for another business unit
-
-Use this when the next environment needs different tables, groups, Genie config, or governance.
+**Add a separate environment (different BU, different tables):**
 
 ```bash
-make setup ENV=bu2
-vi envs/bu2/auth.auto.tfvars
-# Enter the BU workspace credentials.
-#
-vi envs/bu2/env.auto.tfvars
-# Choose the BU catalog and tables to govern.
-#
-
-make generate ENV=bu2
-vi envs/bu2/generated/abac.auto.tfvars
-# Review and iterate on generated policies, groups, and Genie config.
-#
-vi envs/bu2/generated/masking_functions.sql
-# Review and iterate on generated masking functions.
-#
-make validate-generated ENV=bu2
-make apply ENV=bu2
+make setup ENV=bu2 && vi envs/bu2/auth.auto.tfvars && vi envs/bu2/env.auto.tfvars
+make generate ENV=bu2 && make apply ENV=bu2
 ```
 
 ## Documentation
 
-- [Flows](docs/flows.md): quickstart, promotion, separate BU environment, destroy/reset
-- [Architecture](docs/architecture.md): layers, artifact ownership, config files, Genie Space behavior, make targets
-- [CI/CD Integration](docs/cicd.md): how to validate and deploy this quickstart from a pipeline
-- [Troubleshooting](docs/troubleshooting.md): imports, provider quirks, brownfield workflows
-- [Advanced Usage](docs/advanced.md): generation options, IDP-synced groups, ABAC-only mode, masking UDF reuse, multi-environment layout, legacy migration
+- [Flows](docs/flows.md) — all workflows: quickstart, multi-space, multi-catalog, existing spaces, promotion, destroy
+- [Architecture](docs/architecture.md) — layers, artifact ownership, config files, Genie Space lifecycle
+- [CI/CD Integration](docs/cicd.md) — validate and deploy from a pipeline
+- [Troubleshooting](docs/troubleshooting.md) — imports, provider quirks, brownfield workflows
+- [Advanced Usage](docs/advanced.md) — IDP-synced groups, ABAC-only mode, masking UDF reuse, legacy migration
 
 ## Roadmap
 
 - Unity Catalog metrics in Genie
-- Multi Genie Space support
 - Multi data steward / user support
 - AI-assisted tuning and troubleshooting
 - Auto-detect and import existing policies

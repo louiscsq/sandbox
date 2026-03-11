@@ -34,8 +34,12 @@ provider "databricks" {
 }
 
 locals {
-  project_root   = abspath("${path.root}/../..")
-  full_uc_tables = [for t in var.uc_tables : var.uc_catalog != "" ? "${var.uc_catalog}.${t}" : t]
+  project_root = abspath("${path.root}/../..")
+  # 3-part entries (catalog.schema.table) are already fully qualified and passed through as-is.
+  # 2-part entries (schema.table) are prefixed with uc_catalog (legacy schema-relative support).
+  full_uc_tables = [for t in var.uc_tables :
+    length(split(".", t)) >= 3 ? t : (var.uc_catalog != "" ? "${var.uc_catalog}.${t}" : t)
+  ]
 }
 
 variable "env_dir" {

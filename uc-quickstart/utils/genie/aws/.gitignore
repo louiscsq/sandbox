@@ -37,3 +37,4 @@ masking_functions.sql
 
 # Auto-created Genie Space ID (managed by Terraform lifecycle)
 .genie_space_id
+envs/*/.genie_space_id_*

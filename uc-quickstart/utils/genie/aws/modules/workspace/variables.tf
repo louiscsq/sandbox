@@ -24,12 +24,6 @@ variable "databricks_workspace_host" {
   description = "The Databricks workspace URL."
 }
 
-variable "uc_tables" {
-  type        = list(string)
-  default     = []
-  description = "Tables to generate ABAC policies for and to include in Genie."
-}
-
 variable "manage_groups" {
   type        = bool
   default     = false
@@ -51,7 +45,7 @@ variable "groups" {
 variable "sql_warehouse_id" {
   type        = string
   default     = ""
-  description = "Existing SQL warehouse ID to reuse."
+  description = "Shared SQL warehouse ID. Per-space sql_warehouse_id in genie_spaces overrides this."
 }
 
 variable "warehouse_name" {
@@ -60,97 +54,61 @@ variable "warehouse_name" {
   description = "Name of the auto-created serverless warehouse."
 }
 
-variable "genie_space_id" {
-  type        = string
-  default     = ""
-  description = "Existing Genie Space ID. When empty and uc_tables is non-empty, a new space is created."
-}
+# ── Multi-space Genie variables ───────────────────────────────────────────────
 
-variable "genie_space_title" {
-  type        = string
-  default     = "Genie Space"
-  description = "Title for an auto-created Genie Space."
-}
-
-variable "genie_space_description" {
-  type        = string
-  default     = ""
-  description = "Description for an auto-created Genie Space."
-}
-
-variable "genie_sample_questions" {
-  type        = list(string)
-  default     = []
-  description = "Sample questions shown in the Genie UI."
-}
-
-variable "genie_instructions" {
-  type        = string
-  default     = ""
-  description = "Instructions for the Genie LLM."
-}
-
-variable "genie_benchmarks" {
-  type = list(object({
-    question = string
-    sql      = string
+variable "genie_spaces" {
+  type = map(object({
+    name             = string
+    genie_space_id   = string
+    sql_warehouse_id = string
+    uc_tables        = list(string)
+    config = object({
+      title            = string
+      description      = string
+      sample_questions = list(string)
+      instructions     = string
+      benchmarks = list(object({
+        question = string
+        sql      = string
+      }))
+      sql_filters = list(object({
+        sql          = string
+        display_name = string
+        comment      = string
+        instruction  = string
+      }))
+      sql_expressions = list(object({
+        alias        = string
+        sql          = string
+        display_name = string
+        comment      = string
+        instruction  = string
+      }))
+      sql_measures = list(object({
+        alias        = string
+        sql          = string
+        display_name = string
+        comment      = string
+        instruction  = string
+      }))
+      join_specs = list(object({
+        left_table  = string
+        left_alias  = string
+        right_table = string
+        right_alias = string
+        sql         = string
+        comment     = string
+        instruction = string
+      }))
+    })
   }))
-  default     = []
-  description = "Benchmark questions plus ground-truth SQL."
+  default     = {}
+  description = "Map of Genie Space key to merged infra + semantic config. Produced by the workspace root."
 }
 
-variable "genie_sql_filters" {
-  type = list(object({
-    sql          = string
-    display_name = string
-    comment      = string
-    instruction  = string
-  }))
-  default     = []
-  description = "SQL filters exposed to Genie."
-}
-
-variable "genie_sql_expressions" {
-  type = list(object({
-    alias        = string
-    sql          = string
-    display_name = string
-    comment      = string
-    instruction  = string
-  }))
-  default     = []
-  description = "SQL expressions exposed to Genie."
-}
-
-variable "genie_sql_measures" {
-  type = list(object({
-    alias        = string
-    sql          = string
-    display_name = string
-    comment      = string
-    instruction  = string
-  }))
-  default     = []
-  description = "SQL measures exposed to Genie."
-}
-
-variable "genie_join_specs" {
-  type = list(object({
-    left_table  = string
-    left_alias  = string
-    right_table = string
-    right_alias = string
-    sql         = string
-    comment     = string
-    instruction = string
-  }))
-  default     = []
-  description = "Join specs exposed to Genie."
-}
-
-variable "genie_id_file" {
+variable "genie_id_file_prefix" {
   type        = string
-  description = "Path to the per-environment Genie ID file."
+  description = "Path prefix for per-space Genie ID files. Each space appends _{key} to this prefix."
 }
 
 variable "genie_script_path" {

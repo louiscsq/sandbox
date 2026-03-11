@@ -330,19 +330,19 @@ update_genie_config() {
   local token
   token=$(resolve_token "$workspace_url" "") || exit 1
 
-  if [[ -z "${GENIE_ID_FILE:-}" || ! -f "${GENIE_ID_FILE}" ]]; then
-    echo "ERROR: Genie Space ID file not found at '${GENIE_ID_FILE:-<not set>}'." >&2
-    echo "  The space may have been deleted outside Terraform." >&2
-    echo "  To recover: terraform taint 'null_resource.genie_space_create[0]'" >&2
-    exit 1
+  local space_id=""
+
+  # Prefer GENIE_SPACE_OBJECT_ID (set directly for existing spaces);
+  # fall back to reading from GENIE_ID_FILE (used for auto-created spaces).
+  if [[ -n "${GENIE_SPACE_OBJECT_ID:-}" ]]; then
+    space_id="${GENIE_SPACE_OBJECT_ID}"
+  elif [[ -n "${GENIE_ID_FILE:-}" && -f "${GENIE_ID_FILE}" ]]; then
+    space_id=$(cat "${GENIE_ID_FILE}" | tr -d '[:space:]')
   fi
 
-  local space_id
-  space_id=$(cat "${GENIE_ID_FILE}" | tr -d '[:space:]')
-
   if [[ -z "$space_id" ]]; then
-    echo "ERROR: Genie Space ID file is empty." >&2
-    echo "  To recover: terraform taint 'null_resource.genie_space_create[0]'" >&2
+    echo "ERROR: No Genie Space ID available for update-config." >&2
+    echo "  Set GENIE_SPACE_OBJECT_ID (for existing spaces) or ensure GENIE_ID_FILE exists (for auto-created spaces)." >&2
     exit 1
   fi
 

@@ -24,13 +24,33 @@ locals {
     for name, group in data.databricks_group.existing : name => group.id
   }
 
-  effective_warehouse_id = (
+  shared_warehouse_id = (
     var.sql_warehouse_id != ""
     ? var.sql_warehouse_id
     : databricks_sql_endpoint.warehouse[0].id
   )
 
   genie_groups_csv = join(",", keys(var.groups))
+
+  # Spaces that already have an ID — apply ACLs, and config if defined.
+  existing_spaces = { for k, v in var.genie_spaces : k => v if v.genie_space_id != "" }
+
+  # Existing spaces that have non-trivial config — also run update-config.
+  existing_spaces_with_config = {
+    for k, v in local.existing_spaces : k => v
+    if (
+      length(v.config.benchmarks) > 0 ||
+      v.config.instructions != "" ||
+      v.config.description != "" ||
+      length(v.config.sample_questions) > 0
+    )
+  }
+
+  # Spaces that need to be created — genie_space_id is empty and uc_tables is non-empty.
+  new_spaces = {
+    for k, v in var.genie_spaces : k => v
+    if v.genie_space_id == "" && length(v.uc_tables) > 0
+  }
 }
 
 resource "databricks_mws_permission_assignment" "group_assignments" {
@@ -67,11 +87,13 @@ resource "databricks_sql_endpoint" "warehouse" {
   auto_stop_mins = 15
 }
 
+# ── Existing spaces: apply ACLs + config (when config is defined) ─────────────
+
 resource "null_resource" "genie_space_acls" {
-  count = var.genie_space_id != "" ? 1 : 0
+  for_each = local.existing_spaces
 
   triggers = {
-    space_id = var.genie_space_id
+    space_id = each.value.genie_space_id
     groups   = local.genie_groups_csv
   }
 
@@ -82,7 +104,7 @@ resource "null_resource" "genie_space_acls" {
       DATABRICKS_HOST          = var.databricks_workspace_host
       DATABRICKS_CLIENT_ID     = var.databricks_client_id
       DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
-      GENIE_SPACE_OBJECT_ID    = var.genie_space_id
+      GENIE_SPACE_OBJECT_ID    = each.value.genie_space_id
       GENIE_GROUPS_CSV         = local.genie_groups_csv
     }
   }
@@ -90,11 +112,53 @@ resource "null_resource" "genie_space_acls" {
   depends_on = [databricks_mws_permission_assignment.group_assignments]
 }
 
-resource "null_resource" "genie_space_create" {
-  count = var.genie_space_id == "" && length(var.uc_tables) > 0 ? 1 : 0
+# ── Existing spaces: apply config (when genie_space_configs is defined) ───────
+
+resource "null_resource" "genie_space_config_existing" {
+  for_each = local.existing_spaces_with_config
 
   triggers = {
-    id_file       = var.genie_id_file
+    space_id        = each.value.genie_space_id
+    description     = each.value.config.description
+    questions       = jsonencode(each.value.config.sample_questions)
+    instructions    = each.value.config.instructions
+    benchmarks      = jsonencode(each.value.config.benchmarks)
+    sql_filters     = jsonencode(each.value.config.sql_filters)
+    sql_measures    = jsonencode(each.value.config.sql_measures)
+    sql_expressions = jsonencode(each.value.config.sql_expressions)
+    join_specs      = jsonencode(each.value.config.join_specs)
+  }
+
+  provisioner "local-exec" {
+    command = "${var.genie_script_path} update-config"
+
+    environment = {
+      DATABRICKS_HOST          = var.databricks_workspace_host
+      DATABRICKS_CLIENT_ID     = var.databricks_client_id
+      DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
+      GENIE_SPACE_OBJECT_ID    = each.value.genie_space_id
+      GENIE_TITLE              = each.value.config.title != "" ? each.value.config.title : each.value.name
+      GENIE_DESCRIPTION        = each.value.config.description
+      GENIE_SAMPLE_QUESTIONS   = jsonencode(each.value.config.sample_questions)
+      GENIE_INSTRUCTIONS       = each.value.config.instructions
+      GENIE_BENCHMARKS         = jsonencode(each.value.config.benchmarks)
+      GENIE_SQL_FILTERS        = jsonencode(each.value.config.sql_filters)
+      GENIE_SQL_EXPRESSIONS    = jsonencode(each.value.config.sql_expressions)
+      GENIE_SQL_MEASURES       = jsonencode(each.value.config.sql_measures)
+      GENIE_JOIN_SPECS         = jsonencode(each.value.config.join_specs)
+    }
+  }
+
+  depends_on = [databricks_mws_permission_assignment.group_assignments]
+}
+
+# ── New spaces: create ────────────────────────────────────────────────────────
+
+resource "null_resource" "genie_space_create" {
+  for_each = local.new_spaces
+
+  triggers = {
+    id_file       = "${var.genie_id_file_prefix}_${each.key}"
     script        = var.genie_script_path
     host          = var.databricks_workspace_host
     client_id     = var.databricks_client_id
@@ -109,9 +173,13 @@ resource "null_resource" "genie_space_create" {
       DATABRICKS_CLIENT_ID     = self.triggers.client_id
       DATABRICKS_CLIENT_SECRET = self.triggers.client_secret
       GENIE_ID_FILE            = self.triggers.id_file
-      GENIE_TABLES_CSV         = join(",", var.uc_tables)
-      GENIE_WAREHOUSE_ID       = local.effective_warehouse_id
-      GENIE_TITLE              = var.genie_space_title
+      GENIE_TABLES_CSV         = join(",", each.value.uc_tables)
+      GENIE_WAREHOUSE_ID = (
+        each.value.sql_warehouse_id != ""
+        ? each.value.sql_warehouse_id
+        : local.shared_warehouse_id
+      )
+      GENIE_TITLE = each.value.config.title != "" ? each.value.config.title : each.value.name
     }
   }
 
@@ -133,20 +201,22 @@ resource "null_resource" "genie_space_create" {
   ]
 }
 
+# ── New spaces: apply config ──────────────────────────────────────────────────
+
 resource "null_resource" "genie_space_config" {
-  count = var.genie_space_id == "" && length(var.uc_tables) > 0 ? 1 : 0
+  for_each = local.new_spaces
 
   triggers = {
-    tables          = join(",", var.uc_tables)
-    title           = var.genie_space_title
-    description     = var.genie_space_description
-    questions       = jsonencode(var.genie_sample_questions)
-    instructions    = var.genie_instructions
-    benchmarks      = jsonencode(var.genie_benchmarks)
-    sql_filters     = jsonencode(var.genie_sql_filters)
-    sql_measures    = jsonencode(var.genie_sql_measures)
-    sql_expressions = jsonencode(var.genie_sql_expressions)
-    join_specs      = jsonencode(var.genie_join_specs)
+    tables          = join(",", each.value.uc_tables)
+    title           = each.value.config.title
+    description     = each.value.config.description
+    questions       = jsonencode(each.value.config.sample_questions)
+    instructions    = each.value.config.instructions
+    benchmarks      = jsonencode(each.value.config.benchmarks)
+    sql_filters     = jsonencode(each.value.config.sql_filters)
+    sql_measures    = jsonencode(each.value.config.sql_measures)
+    sql_expressions = jsonencode(each.value.config.sql_expressions)
+    join_specs      = jsonencode(each.value.config.join_specs)
   }
 
   provisioner "local-exec" {
@@ -156,26 +226,32 @@ resource "null_resource" "genie_space_config" {
       DATABRICKS_HOST          = var.databricks_workspace_host
       DATABRICKS_CLIENT_ID     = var.databricks_client_id
       DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
-      GENIE_ID_FILE            = var.genie_id_file
-      GENIE_TABLES_CSV         = join(",", var.uc_tables)
-      GENIE_WAREHOUSE_ID       = local.effective_warehouse_id
-      GENIE_TITLE              = var.genie_space_title
-      GENIE_DESCRIPTION        = var.genie_space_description
-      GENIE_SAMPLE_QUESTIONS   = jsonencode(var.genie_sample_questions)
-      GENIE_INSTRUCTIONS       = var.genie_instructions
-      GENIE_BENCHMARKS         = jsonencode(var.genie_benchmarks)
-      GENIE_SQL_FILTERS        = jsonencode(var.genie_sql_filters)
-      GENIE_SQL_EXPRESSIONS    = jsonencode(var.genie_sql_expressions)
-      GENIE_SQL_MEASURES       = jsonencode(var.genie_sql_measures)
-      GENIE_JOIN_SPECS         = jsonencode(var.genie_join_specs)
+      GENIE_ID_FILE            = "${var.genie_id_file_prefix}_${each.key}"
+      GENIE_TABLES_CSV         = join(",", each.value.uc_tables)
+      GENIE_WAREHOUSE_ID = (
+        each.value.sql_warehouse_id != ""
+        ? each.value.sql_warehouse_id
+        : local.shared_warehouse_id
+      )
+      GENIE_TITLE              = each.value.config.title != "" ? each.value.config.title : each.value.name
+      GENIE_DESCRIPTION        = each.value.config.description
+      GENIE_SAMPLE_QUESTIONS   = jsonencode(each.value.config.sample_questions)
+      GENIE_INSTRUCTIONS       = each.value.config.instructions
+      GENIE_BENCHMARKS         = jsonencode(each.value.config.benchmarks)
+      GENIE_SQL_FILTERS        = jsonencode(each.value.config.sql_filters)
+      GENIE_SQL_EXPRESSIONS    = jsonencode(each.value.config.sql_expressions)
+      GENIE_SQL_MEASURES       = jsonencode(each.value.config.sql_measures)
+      GENIE_JOIN_SPECS         = jsonencode(each.value.config.join_specs)
     }
   }
 
   depends_on = [null_resource.genie_space_create]
 }
 
+# ── New spaces: apply ACLs ────────────────────────────────────────────────────
+
 resource "null_resource" "genie_space_acls_created" {
-  count = var.genie_space_id == "" && length(var.uc_tables) > 0 ? 1 : 0
+  for_each = local.new_spaces
 
   triggers = {
     groups = local.genie_groups_csv
@@ -188,7 +264,7 @@ resource "null_resource" "genie_space_acls_created" {
       DATABRICKS_HOST          = var.databricks_workspace_host
       DATABRICKS_CLIENT_ID     = var.databricks_client_id
       DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
-      GENIE_ID_FILE            = var.genie_id_file
+      GENIE_ID_FILE            = "${var.genie_id_file_prefix}_${each.key}"
       GENIE_GROUPS_CSV         = local.genie_groups_csv
     }
   }

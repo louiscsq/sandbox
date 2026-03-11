@@ -1,4 +1,4 @@
-.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate validate validate-generated promote plan sync-tags apply import migrate-state destroy clean clean-all migrate-root-to-env _apply-layer _plan-layer _destroy-layer
+.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate validate validate-generated promote plan sync-tags apply import migrate-state destroy clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer
 
 SHELL := /bin/bash
 export DATABRICKS_USER_AGENT_EXTRA := genierails/0.1.0
@@ -9,7 +9,15 @@ DEFAULT_ENV := dev
 ENV ?= $(DEFAULT_ENV)
 SOURCE_ENV ?= $(ENV)
 DEST_ENV ?=
-DEST_CATALOG ?=
+# Comma-separated src=dest catalog mappings for cross-env promote.
+# All source catalogs referenced in genie_spaces[*].uc_tables must be covered.
+# Example: DEST_CATALOG_MAP="dev_catalog=prod_catalog,dev_hr=prod_hr"
+DEST_CATALOG_MAP ?=
+# Optional: name of a single Genie Space to (re)generate.
+# When set, only that space's tables are fetched and only that space's config is
+# regenerated. Existing tuned config for other spaces is preserved.
+# Example: make generate SPACE="Finance Analytics"
+SPACE ?=
 ENV_ORIGIN := $(origin ENV)
 MODULE_ROOT := $(shell cd "$(dir $(realpath $(lastword $(MAKEFILE_LIST))))" && pwd)
 ENV_DIR := $(MODULE_ROOT)/envs/$(ENV)
@@ -97,12 +105,12 @@ _guard-workspace-target:
 
 _guard-account-config:
 	@cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then \
-		python3 -c 'import sys,hcl2; cfg=hcl2.load(open("abac.auto.tfvars")); bad=[name for name in ("tag_assignments","fgac_policies","genie_space_title","genie_space_description","genie_sample_questions","genie_instructions","genie_benchmarks","genie_sql_filters","genie_sql_expressions","genie_sql_measures","genie_join_specs") if cfg.get(name)]; bad and (print("Account config still contains non-account sections: " + ", ".join(bad)), sys.exit(1))'; \
+		python3 -c 'import sys,hcl2; cfg=hcl2.load(open("abac.auto.tfvars")); bad=[name for name in ("tag_assignments","fgac_policies","genie_space_configs","genie_space_title","genie_space_description","genie_sample_questions","genie_instructions","genie_benchmarks","genie_sql_filters","genie_sql_expressions","genie_sql_measures","genie_join_specs") if cfg.get(name)]; bad and (print("Account config still contains non-account sections: " + ", ".join(bad)), sys.exit(1))'; \
 	fi
 
 _guard-data-access-config:
 	@cd "$(TARGET_DATA_ACCESS_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then \
-		python3 -c 'import sys,hcl2; cfg=hcl2.load(open("abac.auto.tfvars")); bad=[name for name in ("group_members","tag_policies","genie_space_title","genie_space_description","genie_sample_questions","genie_instructions","genie_benchmarks","genie_sql_filters","genie_sql_expressions","genie_sql_measures","genie_join_specs") if cfg.get(name)]; bad and (print("Data-access config still contains non-data-access sections (tag_policies now belong in envs/account): " + ", ".join(bad)), sys.exit(1))'; \
+		python3 -c 'import sys,hcl2; cfg=hcl2.load(open("abac.auto.tfvars")); bad=[name for name in ("group_members","tag_policies","genie_space_configs","genie_space_title","genie_space_description","genie_sample_questions","genie_instructions","genie_benchmarks","genie_sql_filters","genie_sql_expressions","genie_sql_measures","genie_join_specs") if cfg.get(name)]; bad and (print("Data-access config still contains non-data-access sections (tag_policies now belong in envs/account): " + ", ".join(bad)), sys.exit(1))'; \
 	fi
 
 _guard-workspace-config:
@@ -137,9 +145,19 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 init-env: _bootstrap ## Prepare env directories and default config files
 	@echo "Environment bootstrap ready for $(ENV)."
 
-generate: _bootstrap _guard-workspace-target ## Run generate_abac.py in the selected workspace environment
-	@echo "=== Generate ABAC Config ($(ENV)) ==="
-	@cd "$(ENV_DIR)" && python "$(MODULE_ROOT)/generate_abac.py" $(GENERATE_ARGS)
+generate: _bootstrap _guard-workspace-target ## Run generate_abac.py in the selected workspace environment (set SPACE="Name" to regenerate only one space)
+	@echo "=== Generate ABAC Config ($(ENV)$(if $(SPACE), — space: $(SPACE),)) ==="
+	@if [ -n "$(SPACE)" ]; then \
+		if [ ! -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
+			echo "ERROR: No assembled generated/abac.auto.tfvars found."; \
+			echo "  Run 'make generate' (without SPACE=) first to generate the full config,"; \
+			echo "  then use 'make generate SPACE=\"$(SPACE)\"' to add or update individual spaces."; \
+			exit 1; \
+		fi; \
+		cd "$(ENV_DIR)" && python "$(MODULE_ROOT)/generate_abac.py" $(GENERATE_ARGS) --space "$(SPACE)"; \
+	else \
+		cd "$(ENV_DIR)" && python "$(MODULE_ROOT)/generate_abac.py" $(GENERATE_ARGS); \
+	fi
 
 validate-generated: _bootstrap _guard-workspace-target ## Validate generated/ files in the selected workspace environment
 	@echo "=== Validate (generated/) [$(ENV)] ==="
@@ -158,15 +176,10 @@ validate: _bootstrap ## Validate split config in the selected environment
 		cd "$(ENV_DIR)" && python "$(MODULE_ROOT)/validate_abac.py" abac.auto.tfvars; \
 	fi
 
-promote: _bootstrap _guard-workspace-target ## Split generated/ into layers (same-env), or cross-env: make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG=prod_catalog
+promote: _bootstrap _guard-workspace-target ## Split generated/ into layers (same-env), or cross-env: make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_cat=prod_cat"
 	@if [ -n "$(DEST_ENV)" ]; then \
 		if [ "$(DEST_ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(DEST_ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
 			echo "ERROR: DEST_ENV cannot be '$(ACCOUNT_ENV)' or '$(DATA_ACCESS_SUBDIR)'."; exit 1; \
-		fi; \
-		if [ -z "$(DEST_CATALOG)" ]; then \
-			echo "ERROR: DEST_CATALOG is required for cross-env promotion."; \
-			echo "  make promote SOURCE_ENV=$(ENV) DEST_ENV=$(DEST_ENV) DEST_CATALOG=<catalog_name>"; \
-			exit 1; \
 		fi; \
 		if [ "$(SOURCE_ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(SOURCE_ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
 			echo "ERROR: SOURCE_ENV must be a workspace environment, not $(SOURCE_ENV)."; exit 1; \
@@ -176,21 +189,35 @@ promote: _bootstrap _guard-workspace-target ## Split generated/ into layers (sam
 			echo "  Run 'make generate$(if $(filter $(SOURCE_ENV),$(DEFAULT_ENV)),, ENV=$(SOURCE_ENV))' first."; \
 			exit 1; \
 		fi; \
-		echo "=== Cross-env promote: $(SOURCE_ENV) -> $(DEST_ENV) (catalog: $(DEST_CATALOG)) ==="; \
+		if [ -z "$(DEST_CATALOG_MAP)" ]; then \
+			src_catalogs=$$(python3 -c " \
+import hcl2, sys; \
+cfg = hcl2.load(open('$(SOURCE_ENV_DIR)/env.auto.tfvars')); \
+spaces = cfg.get('genie_spaces', []); \
+tables = [t for s in spaces for t in (s.get('uc_tables') or [])]; \
+cats = sorted(set(t.split('.')[0] for t in tables if '.' in t)); \
+print(', '.join(cats) if cats else '(none detected)') \
+"); \
+			echo "ERROR: DEST_CATALOG_MAP is required for cross-env promote."; \
+			echo "       Source catalogs detected in $(SOURCE_ENV)/env.auto.tfvars: $$src_catalogs"; \
+			echo ""; \
+			echo "  make promote SOURCE_ENV=$(SOURCE_ENV) DEST_ENV=$(DEST_ENV) \\"; \
+			echo '    DEST_CATALOG_MAP="<src_catalog>=<dest_catalog>[,<src2>=<dest2>...]"'; \
+			exit 1; \
+		fi; \
+		python3 -c 'import hcl2, sys; cfg = hcl2.load(open("$(SOURCE_ENV_DIR)/env.auto.tfvars")); spaces = cfg.get("genie_spaces", []); tables = [t for s in spaces for t in (s.get("uc_tables") or [])]; src_cats = sorted(set(t.split(".")[0] for t in tables if t.count(".") >= 2)); pairs = {k.strip(): v.strip() for k, v in (p.split("=", 1) for p in "$(DEST_CATALOG_MAP)".split(",") if "=" in p)}; missing = [c for c in src_cats if c not in pairs]; extra = [k for k in pairs if k not in src_cats]; (print("ERROR: DEST_CATALOG_MAP is missing mappings for: " + ", ".join(missing)) or print("       Detected source catalogs in $(SOURCE_ENV)/env.auto.tfvars: " + ", ".join(src_cats)) or sys.exit(1)) if missing else None; (print("ERROR: DEST_CATALOG_MAP references unknown source catalogs: " + ", ".join(extra)) or print("       Check for typos. Detected source catalogs: " + ", ".join(src_cats)) or sys.exit(1)) if extra else None' || exit 1; \
+		echo "=== Cross-env promote: $(SOURCE_ENV) -> $(DEST_ENV) ==="; \
 		$(MAKE) --no-print-directory _prepare-env ENV="$(DEST_ENV)"; \
 		dest_env_dir="$(MODULE_ROOT)/envs/$(DEST_ENV)"; \
-		src_catalog=$$(python3 -c "import hcl2; cfg=hcl2.load(open('$(SOURCE_ENV_DIR)/env.auto.tfvars')); print(cfg.get('uc_catalog',''))"); \
-		tables_hcl=$$(python3 -c "import hcl2; cfg=hcl2.load(open('$(SOURCE_ENV_DIR)/env.auto.tfvars')); ts=cfg.get('uc_tables',[]); print('[' + ', '.join('\"' + t + '\"' for t in ts) + ']')"); \
-		printf 'uc_catalog       = "%s"\nuc_tables        = %s\nsql_warehouse_id = ""\ngenie_space_id   = ""\n' "$(DEST_CATALOG)" "$$tables_hcl" > "$$dest_env_dir/env.auto.tfvars"; \
-		echo "  Wrote $$dest_env_dir/env.auto.tfvars (catalog: $$src_catalog -> $(DEST_CATALOG))"; \
+		python3 -c 'import hcl2, sys; dest = sys.argv[1]; cfg = hcl2.load(open("$(SOURCE_ENV_DIR)/env.auto.tfvars")); pairs = {k.strip(): v.strip() for k, v in (p.split("=", 1) for p in "$(DEST_CATALOG_MAP)".split(",") if "=" in p)}; remap = lambda t: (lambda p: pairs.get(p[0], p[0]) + "." + p[1] if len(p) == 2 else t)(t.split(".", 1)); spaces = cfg.get("genie_spaces", []); space_lines = lambda s: ["  {", "    name             = \"" + (s.get("name") or "") + "\"", "    genie_space_id   = \"" + (s.get("genie_space_id") or "") + "\"", "    sql_warehouse_id = \"" + (s.get("sql_warehouse_id") or "") + "\"", "    uc_tables = ["] + ["      \"" + remap(t) + "\"," for t in (s.get("uc_tables") or [])] + ["    ]", "  },"]; lines = ["genie_spaces = ["] + [line for s in spaces for line in space_lines(s)] + ["]", "", "sql_warehouse_id = \"\""]; open(dest + "/env.auto.tfvars", "w").write("\n".join(lines) + "\n"); print("  Wrote " + dest + "/env.auto.tfvars"); [print("  Catalog remap: " + s + " -> " + d) for s, d in pairs.items()]' "$$dest_env_dir" || exit 1; \
 		mkdir -p "$$dest_env_dir/generated"; \
+		map_flags=$$(python3 -c 'pairs = [p.strip() for p in "$(DEST_CATALOG_MAP)".split(",") if "=" in p]; print(" ".join("--map " + p for p in pairs))'); \
 		python3 "$(MODULE_ROOT)/scripts/remap_generated_config.py" \
 			"$(SOURCE_ENV_DIR)/generated/abac.auto.tfvars" \
 			"$(SOURCE_ENV_DIR)/generated/masking_functions.sql" \
-			"$$src_catalog" \
-			"$(DEST_CATALOG)" \
 			"$$dest_env_dir/generated/abac.auto.tfvars" \
-			"$$dest_env_dir/generated/masking_functions.sql"; \
+			"$$dest_env_dir/generated/masking_functions.sql" \
+			$$map_flags; \
 		cd "$$dest_env_dir" && python3 "$(MODULE_ROOT)/scripts/split_abac_config.py" generated/abac.auto.tfvars ../$(ACCOUNT_ENV)/abac.auto.tfvars $(DATA_ACCESS_SUBDIR)/abac.auto.tfvars abac.auto.tfvars; \
 		cp "$$dest_env_dir/generated/masking_functions.sql" "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/masking_functions.sql"; \
 		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python "$(MODULE_ROOT)/validate_abac.py" abac.auto.tfvars; fi; \
@@ -369,6 +396,76 @@ clean-all: ## Remove all env workspaces under envs/
 	@echo "=== Clean All Environments ==="
 	@rm -rf "$(MODULE_ROOT)/envs"
 	@echo "Removed $(MODULE_ROOT)/envs"
+
+integration-test: ## Run the full end-to-end integration test (setup → generate → apply → verify → promote → apply prod → verify prod → teardown)
+	@# Options:
+	@#   ENV=dev              workspace env for dev  (default: dev)
+	@#   DEST_ENV=prod        workspace env for prod (default: prod)
+	@#   KEEP_DATA=1          skip teardown so you can inspect results after the run
+	@#   WAREHOUSE_ID=<id>    pin a specific SQL warehouse
+	$(eval ITEST_DEST_ENV        ?= prod)
+	$(eval _FIN_CAT              := dev_fin)
+	$(eval _CLIN_CAT             := dev_clinical)
+	$(eval _PROD_FIN_CAT         := prod_fin)
+	$(eval _PROD_CLIN_CAT        := prod_clinical)
+	$(eval ITEST_CATALOG_MAP     := $(_FIN_CAT)=$(_PROD_FIN_CAT),$(_CLIN_CAT)=$(_PROD_CLIN_CAT))
+	$(eval ITEST_AUTH            := $(ENV_DIR)/auth.auto.tfvars)
+	$(eval ITEST_WH_FLAG         := $(if $(WAREHOUSE_ID),--warehouse-id $(WAREHOUSE_ID),))
+	@echo "========================================================"
+	@echo "  Integration Test"
+	@echo "  dev env  : $(ENV)"
+	@echo "  prod env : $(ITEST_DEST_ENV)"
+	@echo "========================================================"
+	@echo ""
+	@echo "── Step 1: Create test catalogs (dev + prod) ──────────"
+	cd "$(MODULE_ROOT)" && python scripts/setup_test_data.py \
+		--auth-file "$(ITEST_AUTH)" $(ITEST_WH_FLAG) --prod
+	@echo ""
+	@echo "── Step 2: Env scaffolding ─────────────────────────────"
+	$(MAKE) --no-print-directory setup ENV="$(ENV)"
+	@echo ""
+	@echo "── Step 3: Apply account layer ─────────────────────────"
+	$(MAKE) --no-print-directory apply ENV=$(ACCOUNT_ENV)
+	@echo ""
+	@echo "── Step 4: Full generate (both spaces) ─────────────────"
+	$(MAKE) --no-print-directory generate ENV="$(ENV)"
+	@echo ""
+	@echo "── Step 5: Apply dev ────────────────────────────────────"
+	$(MAKE) --no-print-directory apply ENV="$(ENV)"
+	@echo ""
+	@echo "── Step 6: Verify dev (row counts + ABAC governance) ───"
+	cd "$(MODULE_ROOT)" && python scripts/setup_test_data.py \
+		--auth-file "$(ITEST_AUTH)" $(ITEST_WH_FLAG) --verify
+	@echo ""
+	@echo "── Step 7: Per-space generation test (Finance only) ────"
+	$(MAKE) --no-print-directory generate ENV="$(ENV)" SPACE="Finance Analytics"
+	@echo ""
+	@echo "── Step 8: Promote dev → $(ITEST_DEST_ENV) ────────────────────"
+	$(MAKE) --no-print-directory promote \
+		SOURCE_ENV="$(ENV)" DEST_ENV="$(ITEST_DEST_ENV)" \
+		DEST_CATALOG_MAP="$(ITEST_CATALOG_MAP)"
+	@echo ""
+	@echo "── Step 9: Apply prod ───────────────────────────────────"
+	$(MAKE) --no-print-directory apply ENV="$(ITEST_DEST_ENV)"
+	@echo ""
+	@echo "── Step 10: Verify prod (row counts + ABAC governance) ─"
+	cd "$(MODULE_ROOT)" && python scripts/setup_test_data.py \
+		--auth-file "$(ITEST_AUTH)" $(ITEST_WH_FLAG) --verify-prod
+	@echo ""
+	@if [ -z "$(KEEP_DATA)" ]; then \
+		echo "── Step 11: Teardown ────────────────────────────────────"; \
+		cd "$(MODULE_ROOT)" && python scripts/setup_test_data.py \
+			--auth-file "$(ITEST_AUTH)" $(ITEST_WH_FLAG) --teardown --teardown-prod; \
+		$(MAKE) --no-print-directory destroy ENV="$(ITEST_DEST_ENV)"; \
+		$(MAKE) --no-print-directory destroy ENV="$(ENV)"; \
+		$(MAKE) --no-print-directory destroy ENV=$(ACCOUNT_ENV); \
+	else \
+		echo "── Step 11: Teardown skipped (KEEP_DATA=1) ─────────────"; \
+	fi
+	@echo ""
+	@echo "========================================================"
+	@echo "  Integration test PASSED."
+	@echo "========================================================"
 
 migrate-root-to-env: _prepare-env ## Move existing root working files into envs/<ENV>
 	@echo "=== Migrate Root Workspace to $(ENV) ==="

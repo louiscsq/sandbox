@@ -197,6 +197,278 @@ def format_table_info(table_info) -> str:
     return "\n".join(lines)
 
 
+def _parse_str_field(val) -> str:
+    """Safely extract the first string from a list-or-string field in serialized_space."""
+    if isinstance(val, list):
+        return val[0] if val else ""
+    return val or ""
+
+
+def parse_genie_config_from_serialized_space(serialized: str, description: str = "") -> dict:
+    """Parse a Genie Space's serialized_space JSON into a genie_space_configs dict.
+
+    Returns a dict with keys: description, instructions, sample_questions,
+    benchmarks, sql_filters, sql_expressions, sql_measures, join_specs.
+    Only includes keys that have non-empty values.
+    """
+    import json as _json
+
+    try:
+        space_data = _json.loads(serialized)
+    except Exception:
+        return {}
+
+    config: dict = {}
+
+    if description:
+        config["description"] = description
+
+    # Instructions (free-text)
+    text_instrs = space_data.get("instructions", {}).get("text_instructions", [])
+    if text_instrs:
+        content = _parse_str_field(text_instrs[0].get("content", ""))
+        if content:
+            config["instructions"] = content
+
+    # Sample questions
+    sq_items = space_data.get("config", {}).get("sample_questions", [])
+    questions = [_parse_str_field(item.get("question", "")) for item in sq_items]
+    questions = [q for q in questions if q]
+    if questions:
+        config["sample_questions"] = questions
+
+    # Benchmarks
+    bm_items = space_data.get("benchmarks", {}).get("questions", [])
+    benchmarks = []
+    for bm in bm_items:
+        question = _parse_str_field(bm.get("question", ""))
+        sql = ""
+        for ans in bm.get("answer", []):
+            if ans.get("format") == "SQL":
+                sql = _parse_str_field(ans.get("content", ""))
+                break
+        if question and sql:
+            benchmarks.append({"question": question, "sql": sql})
+    if benchmarks:
+        config["benchmarks"] = benchmarks
+
+    snippets = space_data.get("instructions", {}).get("sql_snippets", {})
+
+    # SQL filters
+    filters = [
+        {"sql": _parse_str_field(f.get("sql", "")), "display_name": f.get("display_name", "")}
+        for f in snippets.get("filters", [])
+        if _parse_str_field(f.get("sql", ""))
+    ]
+    if filters:
+        config["sql_filters"] = filters
+
+    # SQL expressions
+    exprs = [
+        {"alias": e.get("alias", ""), "sql": _parse_str_field(e.get("sql", ""))}
+        for e in snippets.get("expressions", [])
+        if _parse_str_field(e.get("sql", ""))
+    ]
+    if exprs:
+        config["sql_expressions"] = exprs
+
+    # SQL measures
+    measures = [
+        {"alias": m.get("alias", ""), "sql": _parse_str_field(m.get("sql", ""))}
+        for m in snippets.get("measures", [])
+        if _parse_str_field(m.get("sql", ""))
+    ]
+    if measures:
+        config["sql_measures"] = measures
+
+    # Join specs
+    joins = [
+        {
+            "left_table": j.get("left", {}).get("identifier", ""),
+            "right_table": j.get("right", {}).get("identifier", ""),
+            "sql": _parse_str_field(j.get("sql", "")),
+        }
+        for j in space_data.get("instructions", {}).get("join_specs", [])
+        if _parse_str_field(j.get("sql", ""))
+    ]
+    if joins:
+        config["join_specs"] = joins
+
+    return config
+
+
+def _hcl_str(s: str) -> str:
+    """Format a Python string as an HCL quoted string literal."""
+    escaped = s.replace("\\", "\\\\").replace('"', '\\"').replace("${", "$${")
+    return f'"{escaped}"'
+
+
+def format_genie_space_configs_hcl(configs: dict[str, dict]) -> str:
+    """Convert a dict of {space_key: config_dict} to the genie_space_configs HCL block.
+
+    The space_key is the human-readable name used as the map key in abac.auto.tfvars.
+    """
+    lines = ["genie_space_configs = {"]
+
+    for space_name, cfg in configs.items():
+        lines.append(f"  {_hcl_str(space_name)} = {{")
+
+        if cfg.get("description"):
+            lines.append(f"    description = {_hcl_str(cfg['description'])}")
+
+        if cfg.get("instructions"):
+            lines.append(f"    instructions = {_hcl_str(cfg['instructions'])}")
+
+        if cfg.get("sample_questions"):
+            lines.append("    sample_questions = [")
+            for q in cfg["sample_questions"]:
+                lines.append(f"      {_hcl_str(q)},")
+            lines.append("    ]")
+
+        if cfg.get("benchmarks"):
+            lines.append("    benchmarks = [")
+            for bm in cfg["benchmarks"]:
+                lines.append("      {")
+                lines.append(f"        question = {_hcl_str(bm['question'])}")
+                lines.append(f"        sql      = {_hcl_str(bm['sql'])}")
+                lines.append("      },")
+            lines.append("    ]")
+
+        if cfg.get("sql_filters"):
+            lines.append("    sql_filters = [")
+            for f in cfg["sql_filters"]:
+                lines.append("      {")
+                lines.append(f"        sql          = {_hcl_str(f['sql'])}")
+                lines.append(f"        display_name = {_hcl_str(f.get('display_name', ''))}")
+                lines.append("      },")
+            lines.append("    ]")
+
+        if cfg.get("sql_expressions"):
+            lines.append("    sql_expressions = [")
+            for e in cfg["sql_expressions"]:
+                lines.append("      {")
+                lines.append(f"        alias = {_hcl_str(e['alias'])}")
+                lines.append(f"        sql   = {_hcl_str(e['sql'])}")
+                lines.append("      },")
+            lines.append("    ]")
+
+        if cfg.get("sql_measures"):
+            lines.append("    sql_measures = [")
+            for m in cfg["sql_measures"]:
+                lines.append("      {")
+                lines.append(f"        alias = {_hcl_str(m['alias'])}")
+                lines.append(f"        sql   = {_hcl_str(m['sql'])}")
+                lines.append("      },")
+            lines.append("    ]")
+
+        if cfg.get("join_specs"):
+            lines.append("    join_specs = [")
+            for j in cfg["join_specs"]:
+                lines.append("      {")
+                lines.append(f"        left_table  = {_hcl_str(j['left_table'])}")
+                lines.append(f"        right_table = {_hcl_str(j['right_table'])}")
+                lines.append(f"        sql         = {_hcl_str(j['sql'])}")
+                lines.append("      },")
+            lines.append("    ]")
+
+        lines.append("  }")
+
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def remove_hcl_top_level_block(text: str, key: str) -> str:
+    """Remove a top-level HCL assignment block 'key = { ... }' from text.
+
+    Uses brace counting to correctly handle nested objects.
+    """
+    import re as _re
+
+    pattern = _re.compile(rf"^{_re.escape(key)}\s*=\s*\{{", _re.MULTILINE)
+    m = pattern.search(text)
+    if not m:
+        return text
+
+    start = m.start()
+    depth = 0
+    end = m.end() - 1  # position of the opening {
+
+    for i in range(m.end() - 1, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+
+    # Strip one surrounding newline to avoid double blank lines
+    block_end = end + 1
+    if block_end < len(text) and text[block_end] == "\n":
+        block_end += 1
+
+    return text[:start] + text[block_end:]
+
+
+def fetch_tables_from_genie_space(space_id: str, auth_cfg: dict) -> tuple[list[str], dict, str]:
+    """Fetch tables and config from an existing Genie Space via the REST API.
+
+    Returns (table_identifiers, genie_config_dict, space_title).
+    Uses GET /api/2.0/genie/spaces/{space_id} and parses serialized_space.
+    """
+    import json as _json
+
+    from databricks.sdk import WorkspaceClient
+
+    configure_databricks_env(auth_cfg)
+    w = WorkspaceClient(product=PRODUCT_NAME, product_version=PRODUCT_VERSION)
+
+    print(f"  Querying Genie Space {space_id}...")
+    try:
+        resp = w.api_client.do("GET", f"/api/2.0/genie/spaces/{space_id}")
+    except Exception as e:
+        print(f"  WARNING: Could not reach Genie Space {space_id}: {e}")
+        return [], {}, ""
+
+    if not isinstance(resp, dict):
+        print(f"  WARNING: Unexpected response type from Genie Space {space_id}.")
+        return [], {}, ""
+
+    space_title = resp.get("title", "")
+    description = resp.get("description", "")
+    serialized = resp.get("serialized_space", "")
+
+    if not serialized:
+        print(f"  WARNING: Genie Space {space_id} returned no serialized_space.")
+        return [], {}, space_title
+
+    # --- Tables ---
+    try:
+        space_data = _json.loads(serialized)
+        tables = space_data.get("data_sources", {}).get("tables", [])
+        identifiers = [t["identifier"] for t in tables if "identifier" in t]
+    except Exception as e:
+        print(f"  WARNING: Could not parse table list from Genie Space {space_id}: {e}")
+        identifiers = []
+
+    if identifiers:
+        print(f"    Discovered {len(identifiers)} table(s): {', '.join(identifiers)}")
+    else:
+        print(f"  WARNING: Genie Space {space_id} has no tables configured yet.")
+
+    # --- Config ---
+    genie_config = parse_genie_config_from_serialized_space(serialized, description=description)
+    n_benchmarks = len(genie_config.get("benchmarks", []))
+    n_filters = len(genie_config.get("sql_filters", []))
+    n_measures = len(genie_config.get("sql_measures", []))
+    print(
+        f"    Parsed config: {n_benchmarks} benchmark(s), "
+        f"{n_filters} filter(s), {n_measures} measure(s)"
+    )
+
+    return identifiers, genie_config, space_title
+
+
 def fetch_tables_from_databricks(
     table_refs: list[str],
     auth_cfg: dict,
@@ -252,8 +524,14 @@ def fetch_tables_from_databricks(
 
 def build_prompt(ddl_text: str,
                  catalog_schemas: list[tuple[str, str]] | None = None,
-                 group_names: list[str] | None = None) -> str:
-    """Build the full prompt by injecting DDL and optional group names into the template."""
+                 group_names: list[str] | None = None,
+                 per_space_name: str | None = None) -> str:
+    """Build the full prompt by injecting DDL and optional group names into the template.
+
+    When per_space_name is set, an extra instruction is injected telling the LLM
+    to generate ONLY config for that specific space (skip groups and tag_policies,
+    which are shared state established by full generation).
+    """
     template = PROMPT_TEMPLATE_PATH.read_text()
 
     section_marker = "### MY TABLES"
@@ -280,14 +558,30 @@ def build_prompt(ddl_text: str,
             groups_lines += f"  - {g}\n"
         groups_lines += "\n"
 
+    per_space_instruction = ""
+    if per_space_name:
+        per_space_instruction = (
+            "\n### PER-SPACE GENERATION MODE\n\n"
+            f"You are generating config for a SINGLE Genie Space named: \"{per_space_name}\"\n\n"
+            "IMPORTANT CONSTRAINTS:\n"
+            "- Generate ONLY: genie_space_configs (for this space), tag_assignments "
+            "(for the tables listed below), fgac_policies, and masking functions.\n"
+            "- Do NOT generate 'groups' — those are established shared governance state.\n"
+            "- Do NOT generate 'tag_policies' — those are established shared governance state.\n"
+            "- Do NOT generate 'group_members' — those are established shared governance state.\n"
+            "- The groups to use in fgac_policies and genie ACLs are listed under "
+            "REQUIRED GROUP NAMES above. Use them exactly.\n\n"
+        )
+
     if idx == -1:
         print("WARNING: Could not find '### MY TABLES' in ABAC_PROMPT.md")
         print("  Appending DDL at the end of the prompt instead.\n")
-        prompt = template + f"\n\n{groups_lines}{cs_lines}\n\n{ddl_text}\n"
+        prompt = template + f"\n\n{per_space_instruction}{groups_lines}{cs_lines}\n\n{ddl_text}\n"
     else:
         prompt_body = template[:idx].rstrip()
         user_input = (
-            f"\n\n{groups_lines}"
+            f"\n\n{per_space_instruction}"
+            f"{groups_lines}"
             f"### MY TABLES\n\n"
             f"{cs_lines}\n"
             f"```sql\n{ddl_text}\n```\n"
@@ -672,6 +966,82 @@ def autofix_tag_policies(tfvars_path: Path) -> int:
     return added_total
 
 
+def sanitize_space_key(name: str) -> str:
+    """Convert a human-readable space name to a safe directory/Terraform key.
+
+    Mirrors the sanitization applied in Terraform locals:
+      'Finance Analytics' -> 'finance_analytics'
+      'Exec Dashboard (Q1)' -> 'exec_dashboard_q1'
+    """
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def load_groups_from_account_config() -> list[str]:
+    """Load existing group names from the shared account abac.auto.tfvars.
+
+    Returns an empty list if the file doesn't exist or has no groups.
+    The account config lives at <env_parent>/account/abac.auto.tfvars
+    relative to the current working directory.
+    """
+    account_abac = WORK_DIR.parent / "account" / "abac.auto.tfvars"
+    if not account_abac.exists():
+        return []
+    try:
+        import hcl2
+        with open(account_abac) as f:
+            cfg = hcl2.load(f)
+        groups = cfg.get("groups") or {}
+        if isinstance(groups, dict) and groups:
+            names = list(groups.keys())
+            print(f"  Auto-loaded {len(names)} group(s) from account config.")
+            return names
+    except Exception as e:
+        print(f"  WARNING: Could not read account groups from {account_abac}: {e}")
+    return []
+
+
+def bootstrap_per_space_dirs(out_dir: Path, auth_cfg: dict, hcl_text: str) -> None:
+    """After a full generation, extract each space's genie_space_configs entry
+    and write it to generated/spaces/<key>/abac.auto.tfvars.
+
+    This bootstraps the per-space directory structure so that subsequent
+    per-space generation runs can patch individual spaces without touching others.
+    """
+    try:
+        import hcl2
+        import io
+        parsed = hcl2.load(io.StringIO(hcl_text))
+        genie_cfgs: dict = parsed.get("genie_space_configs") or {}
+    except Exception as e:
+        print(f"  WARNING: Could not parse genie_space_configs for bootstrap: {e}")
+        return
+
+    if not genie_cfgs:
+        return
+
+    spaces_dir = out_dir / "spaces"
+    for space_name, cfg in genie_cfgs.items():
+        key = sanitize_space_key(space_name)
+        space_dir = spaces_dir / key
+        space_dir.mkdir(parents=True, exist_ok=True)
+
+        space_abac = space_dir / "abac.auto.tfvars"
+        content = (
+            "# ============================================================================\n"
+            f"# Per-space config for: {space_name}\n"
+            "# Bootstrapped by full generation. Re-run: make generate SPACE=\"" + space_name + "\"\n"
+            "# to regenerate only this space without touching others.\n"
+            "# ============================================================================\n\n"
+            + format_genie_space_configs_hcl({space_name: cfg})
+            + "\n"
+        )
+        space_abac.write_text(content)
+
+    print(
+        f"  Bootstrapped {len(genie_cfgs)} per-space dir(s) under {spaces_dir.relative_to(out_dir.parent) if out_dir.parent != out_dir else spaces_dir}"
+    )
+
+
 def run_validation(out_dir: Path) -> bool:
     """Run validate_abac.py on the generated files. Returns True if passed."""
     validator = SCRIPT_DIR / "validate_abac.py"
@@ -745,6 +1115,17 @@ def main():
              "When set, the LLM uses these exact names instead of inventing new ones. "
              "Useful for IDP-synced groups (e.g. --groups 'Finance_Analyst,Clinical_Staff').",
     )
+    parser.add_argument(
+        "--space",
+        metavar="SPACE_NAME",
+        help="Name of a single Genie Space to (re)generate. "
+             "Fetches only that space's tables, instructs the LLM to skip groups and "
+             "tag_policies (shared state), and writes output to generated/spaces/<key>/. "
+             "Existing groups are auto-loaded from envs/account/abac.auto.tfvars. "
+             "After writing, the assembled generated/abac.auto.tfvars is patched with "
+             "the new space's content — other spaces are untouched. "
+             "Example: make generate SPACE=\"Finance Analytics\"",
+    )
 
     args = parser.parse_args()
 
@@ -754,14 +1135,113 @@ def main():
 
     print("=" * 60)
     print("  ABAC Configuration Generator")
+    if args.space:
+        print(f"  Mode: per-space — '{args.space}'")
     print("=" * 60)
 
     auth_cfg = load_auth_config(auth_file)
+
+    # ── Per-space mode: resolve the target space and redirect out_dir ────────
+    # When --space is given, we only generate config for that one space.
+    # The output goes to generated/spaces/<key>/ instead of generated/, and
+    # after writing we merge the new content back into generated/abac.auto.tfvars.
+    target_space_cfg: dict | None = None
+    space_key: str = ""
+
+    if args.space:
+        genie_spaces_cfg_all = auth_cfg.get("genie_spaces", [])
+        for sp in genie_spaces_cfg_all:
+            sp_name = sp.get("name") or sp.get("genie_space_id") or ""
+            if sp_name == args.space or sanitize_space_key(sp_name) == sanitize_space_key(args.space):
+                target_space_cfg = sp
+                break
+
+        if target_space_cfg is None:
+            print(f"ERROR: No Genie Space named '{args.space}' found in env.auto.tfvars.")
+            print("  Available spaces:")
+            for sp in genie_spaces_cfg_all:
+                print(f"    - {sp.get('name') or sp.get('genie_space_id') or '(unnamed)'}")
+            sys.exit(1)
+
+        space_key = sanitize_space_key(
+            target_space_cfg.get("name") or target_space_cfg.get("genie_space_id") or args.space
+        )
+        # Redirect output to the per-space directory
+        base_out_dir = Path(args.out_dir)
+        out_dir = base_out_dir / "spaces" / space_key
+        print(f"  Space key:  {space_key}")
+        print(f"  Out dir:    {out_dir}")
+
+        # Auto-load existing groups from the account config so the LLM reuses them
+        if not args.groups:
+            existing_groups = load_groups_from_account_config()
+            if existing_groups:
+                args.groups = ",".join(existing_groups)
 
     catalog = args.catalog or ""
     schema = args.schema or ""
 
     catalog_schemas: list[tuple[str, str]] | None = None
+
+    # ── Auto-discover tables and config from genie_spaces entries ────────────
+    # For spaces where genie_space_id is set but uc_tables is empty, query the
+    # Genie Space API to learn what tables and config that space contains.
+    # The existing space's genie_space_configs is parsed verbatim from the API
+    # (no LLM involvement) and injected into the generated abac.auto.tfvars
+    # after the LLM runs, replacing whatever the LLM generated for that space.
+    api_genie_configs: dict[str, dict] = {}  # space_name -> config parsed from API
+
+    if not args.tables:
+        genie_spaces_cfg = auth_cfg.get("genie_spaces", [])
+        # In per-space mode, restrict scanning to only the target space
+        if target_space_cfg is not None:
+            genie_spaces_cfg = [target_space_cfg]
+        if genie_spaces_cfg:
+            all_space_tables: list[str] = []
+            discovered_from_api: list[str] = []
+
+            for space in genie_spaces_cfg:
+                space_tables = space.get("uc_tables") or []
+                space_id = space.get("genie_space_id") or ""
+                space_name = space.get("name") or space_id
+
+                if space_id:
+                    # Always query the API for existing spaces to get config.
+                    # Tables are also discovered here if uc_tables is not set.
+                    if not space_tables:
+                        print(f"\n  Genie Space '{space_name}' has no uc_tables — querying API...")
+                    else:
+                        print(f"\n  Querying existing Genie Space '{space_name}' for config...")
+
+                    tables, genie_cfg, api_title = fetch_tables_from_genie_space(space_id, auth_cfg)
+
+                    # Use the API title as the canonical name if no name was given
+                    effective_name = space_name if space_name != space_id else (api_title or space_id)
+
+                    if not space_tables:
+                        all_space_tables.extend(tables)
+                        discovered_from_api.extend(tables)
+                    else:
+                        all_space_tables.extend(space_tables)
+
+                    if genie_cfg:
+                        api_genie_configs[effective_name] = genie_cfg
+                else:
+                    all_space_tables.extend(space_tables)
+
+            # Merge space tables with any top-level uc_tables (dedup, space tables first)
+            existing_top = auth_cfg.get("uc_tables") or []
+            merged = list(dict.fromkeys(all_space_tables + existing_top))
+            if merged:
+                auth_cfg["uc_tables"] = merged
+
+            if discovered_from_api:
+                print(
+                    "\n  Auto-discovered tables from existing Genie Space(s):\n"
+                    + "".join(f"    - {t}\n" for t in discovered_from_api)
+                    + "\n  NOTE: Add these tables to data_access/env.auto.tfvars so that\n"
+                    "  UC grants and masking functions are applied to them as well."
+                )
 
     # Resolve table refs: CLI --tables overrides uc_tables from config
     table_refs = args.tables or auth_cfg.get("uc_tables") or None
@@ -824,12 +1304,14 @@ def main():
     group_names = None
     if args.groups:
         group_names = [g.strip() for g in args.groups.split(",") if g.strip()]
-        print(f"  Groups:   {', '.join(group_names)} (from --groups CLI)")
+        src = "auto-loaded from account config" if target_space_cfg is not None and not args.groups.startswith(args.groups) else "--groups CLI"
+        print(f"  Groups:   {', '.join(group_names)} ({src})")
 
     prompt = build_prompt(
         ddl_text,
         catalog_schemas=catalog_schemas,
         group_names=group_names,
+        per_space_name=args.space if args.space else None,
     )
 
     if args.dry_run:
@@ -945,6 +1427,24 @@ Before you apply, tune for your business roles, security requirements, and Genie
         )
 
         hcl_block = sanitize_tfvars_hcl(hcl_block)
+
+        # ── Inject API-parsed genie_space_configs for existing spaces ─────────
+        # The LLM generates genie_space_configs from DDL, but for spaces with a
+        # genie_space_id the UI config is authoritative. Replace the LLM-generated
+        # block with the verbatim parse from the Genie Space API.
+        if api_genie_configs:
+            hcl_block = remove_hcl_top_level_block(hcl_block, "genie_space_configs")
+            injected_hcl = (
+                "\n# genie_space_configs parsed verbatim from the existing Genie Space(s).\n"
+                "# Edit here to manage space config as code; make apply pushes changes back.\n"
+                + format_genie_space_configs_hcl(api_genie_configs)
+            )
+            hcl_block = hcl_block.rstrip() + "\n" + injected_hcl + "\n"
+            print(
+                f"  Injected genie_space_configs from Genie API for: "
+                f"{', '.join(api_genie_configs)}"
+            )
+
         tfvars_path = out_dir / "abac.auto.tfvars"
         tfvars_path.write_text(hcl_header + hcl_block + "\n")
         print(f"  abac.auto.tfvars written to: {tfvars_path}")
@@ -953,8 +1453,26 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_fixed:
             print(f"  Auto-fixed {n_fixed} missing tag_policy value(s)")
 
+        # ── Per-space mode: bootstrap per-space dir, then merge into assembled ──
+        if target_space_cfg is not None and space_key:
+            # The per-space dir is already out_dir; merge its content into
+            # the assembled generated/abac.auto.tfvars one level up.
+            assembled_dir = out_dir.parent.parent  # generated/spaces/<key>/../.. = generated/
+            merge_script = SCRIPT_DIR / "scripts" / "merge_space_configs.py"
+            subprocess.check_call(
+                [sys.executable, str(merge_script), str(assembled_dir), space_key]
+            )
+
+        # ── Full generation: bootstrap per-space dirs from the assembled output ─
+        elif target_space_cfg is None and not args.space:
+            bootstrap_per_space_dirs(out_dir, auth_cfg, hcl_block)
+
+    # In per-space mode, validate the assembled generated/ dir (what apply uses),
+    # not the per-space subdirectory.
+    validation_dir = out_dir.parent.parent if (target_space_cfg is not None and space_key) else out_dir
+
     if sql_block and hcl_block and not args.skip_validation:
-        passed = run_validation(out_dir)
+        passed = run_validation(validation_dir)
         if not passed:
             print("\n  Validation found errors. Review the output above and fix before running terraform apply.")
             sys.exit(1)
@@ -962,6 +1480,8 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if args.promote and passed:
             if WORK_DIR.name in {"account", "data_access"}:
                 print("\n  [SKIP] --promote requires a workspace env directory (e.g. envs/dev).")
+            elif target_space_cfg is not None and space_key:
+                print("\n  [SKIP] --promote is not supported with --space. Run make apply after reviewing.")
             else:
                 split_script = SCRIPT_DIR / "scripts" / "split_abac_config.py"
                 account_path = WORK_DIR.parent / "account" / "abac.auto.tfvars"
@@ -995,6 +1515,17 @@ Before you apply, tune for your business roles, security requirements, and Genie
             env_suffix = f" ENV={env_name}" if env_name != "dev" else ""
             print("  Files promoted into the current env workspace. Next step:")
             print(f"    make apply{env_suffix}   (or: terraform init && terraform apply -parallelism=1)")
+        elif args.space:
+            env_name = Path.cwd().name
+            env_suffix = f" ENV={env_name}" if env_name != "dev" else ""
+            assembled_dir = out_dir.parent.parent
+            print(f"  Per-space output: {out_dir.resolve()}")
+            print(f"  Merged into:      {(assembled_dir / 'abac.auto.tfvars').resolve()}")
+            print("  Next steps:")
+            print(f"    1. Review generated/spaces/{space_key}/abac.auto.tfvars  (space-specific draft)")
+            print(f"    2. Review generated/abac.auto.tfvars  (assembled — what apply uses)")
+            print(f"    3. make validate-generated{env_suffix}")
+            print(f"    4. make apply{env_suffix}")
         else:
             env_name = Path.cwd().name
             env_suffix = f" ENV={env_name}" if env_name != "dev" else ""
