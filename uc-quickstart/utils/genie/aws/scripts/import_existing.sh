@@ -91,10 +91,11 @@ run_import() {
 # account-level SCIM IDs via the Databricks SDK (required for terraform import).
 # Outputs "name:scim_id" lines; falls back to "name:" (empty ID) if unreachable.
 extract_group_name_id_pairs() {
-  python3 -c "
-import hcl2, sys, os
+  python3 - << 'GEOF'
+import hcl2, sys, os, urllib.request, urllib.error, json as _json
 
-# ── 1. Read group names from abac.auto.tfvars ──────────────────────────────
+def _str(v): return (v[0] if isinstance(v, list) else v or '').strip()
+
 try:
     with open('abac.auto.tfvars') as f:
         cfg = hcl2.load(f)
@@ -106,25 +107,17 @@ except Exception as e:
 if not group_names:
     sys.exit(0)
 
-# ── 2. Load auth credentials ───────────────────────────────────────────────
-def _str(v):
-    return (v[0] if isinstance(v, list) else v or '').strip()
-
 auth = {}
-for fname in ['auth.auto.tfvars']:
+for fname in ['auth.auto.tfvars', '../auth.auto.tfvars']:
     if os.path.exists(fname):
-        try:
-            with open(fname) as f:
-                auth = hcl2.load(f)
-        except Exception:
-            pass
+        with open(fname) as f:
+            auth = hcl2.load(f)
         break
 
-account_id    = _str(auth.get('databricks_account_id', ''))    or os.environ.get('DATABRICKS_ACCOUNT_ID', '')
-client_id     = _str(auth.get('databricks_client_id', ''))     or os.environ.get('DATABRICKS_CLIENT_ID', '')
+account_id    = _str(auth.get('databricks_account_id',    '')) or os.environ.get('DATABRICKS_ACCOUNT_ID', '')
+client_id     = _str(auth.get('databricks_client_id',     '')) or os.environ.get('DATABRICKS_CLIENT_ID', '')
 client_secret = _str(auth.get('databricks_client_secret', '')) or os.environ.get('DATABRICKS_CLIENT_SECRET', '')
 
-# ── 3. Look up each group's numeric SCIM ID ────────────────────────────────
 if not account_id:
     sys.stderr.write('WARNING: No databricks_account_id found; skipping group ID lookup.\n')
     sys.exit(0)
@@ -137,35 +130,56 @@ try:
         client_id=client_id,
         client_secret=client_secret,
     )
+    token_headers = a.config.authenticate()
+    base = f'https://accounts.cloud.databricks.com/api/2.0/accounts/{account_id}'
     for name in group_names:
         try:
-            found = list(a.groups.list(filter=f'displayName eq \"{name}\"'))
-            if found and found[0].id:
-                print(name + ':' + str(found[0].id))
-            # If not found, print nothing — the group doesn't exist, import not needed
+            import urllib.parse
+            q = urllib.parse.quote(f'displayName eq "{name}"')
+            url = f'{base}/scim/v2/Groups?filter={q}'
+            req = urllib.request.Request(url, headers=token_headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read())
+            resources = data.get('Resources', [])
+            if resources and resources[0].get('id'):
+                print(name + ':' + str(resources[0]['id']))
+            # If not found, print nothing — group doesn't exist, skip import
         except Exception as e:
             sys.stderr.write(f'WARNING: group lookup failed for {name!r}: {e}\n')
-except ImportError:
-    sys.stderr.write('WARNING: databricks-sdk not installed; cannot look up group IDs.\n')
-" 2>/dev/null || true
+except Exception as e:
+    sys.stderr.write(f'WARNING: AccountClient auth failed: {e}\n')
+GEOF
 }
 
 # Only outputs tag keys that EXIST in the Databricks account, to avoid
 # "Cannot import non-existent remote object" noise for freshly-destroyed policies.
 extract_tag_keys() {
-  python3 -c "
-import hcl2, sys
+  python3 - << 'TKEOF'
+import hcl2, sys, os
+
+def _str(v): return (v[0] if isinstance(v, list) else v or '').strip()
+
 with open('abac.auto.tfvars') as f:
     cfg = hcl2.load(f)
 desired = set(tp.get('key', '') for tp in cfg.get('tag_policies', []))
 if not desired:
     sys.exit(0)
+
+auth = {}
+for fname in ['auth.auto.tfvars', '../auth.auto.tfvars']:
+    if os.path.exists(fname):
+        with open(fname) as f:
+            auth = hcl2.load(f)
+        break
+
+account_id    = _str(auth.get('databricks_account_id',    ''))
+client_id     = _str(auth.get('databricks_client_id',     ''))
+client_secret = _str(auth.get('databricks_client_secret', ''))
+
+use_existence_check = False
+existing = set()
+
 try:
-    with open('auth.auto.tfvars') as f:
-        auth = hcl2.load(f)
-    account_id    = auth.get('databricks_account_id',    [''])[0]
-    client_id     = auth.get('databricks_client_id',     [''])[0]
-    client_secret = auth.get('databricks_client_secret', [''])[0]
     from databricks.sdk import AccountClient
     a = AccountClient(
         host='https://accounts.cloud.databricks.com',
@@ -173,19 +187,22 @@ try:
         client_id=client_id,
         client_secret=client_secret,
     )
-    existing = set()
     for tp in a.tag_policies.list():
         key = getattr(tp, 'tag_key', None)
         if key and key in desired:
             existing.add(key)
+    use_existence_check = True
+except Exception as e:
+    sys.stderr.write(f'WARNING: tag_policies.list() failed ({e}), falling back\n')
+
+if use_existence_check:
     for k in sorted(existing):
         print(k)
-except Exception as e:
+else:
     # Fall back: output all desired keys; import will fail gracefully if missing
-    sys.stderr.write(f'WARNING: tag_policies.list() failed ({e}), falling back\\n')
     for k in sorted(desired):
         print(k)
-" 2>/dev/null || true
+TKEOF
 }
 
 # Outputs TAB-separated lines: tf_key<TAB>import_id
@@ -371,18 +388,20 @@ for ta in tag_assignments:
         continue
 
     try:
+        from databricks.sdk.service.sql import StatementState as _SS
         resp = w.statement_execution.execute_statement(
             statement=sql,
             warehouse_id=warehouse_id,
             wait_timeout='30s',
-            on_wait_timeout='CANCEL',
         )
-        state = str(resp.status.state) if resp.status else ''
-        if 'SUCCEEDED' in state:
+        raw_state = getattr(getattr(resp, 'status', None), 'state', None)
+        state_str = raw_state.value if hasattr(raw_state, 'value') else str(raw_state or '')
+        if 'SUCCEEDED' in state_str:
             print(f'  Cleared tag {tkey} on {ename}')
             cleaned += 1
-        elif 'FAILED' in state:
-            err = (resp.status.error.message if resp.status and resp.status.error else '') or ''
+        elif 'FAILED' in state_str:
+            raw_err = getattr(getattr(resp, 'status', None), 'error', None)
+            err = str(getattr(raw_err, 'message', '') or raw_err or '')
             if not ('not found' in err.lower() or 'does not exist' in err.lower() or 'unset' in err.lower()):
                 sys.stderr.write(f'  WARNING: could not clear {tkey} on {ename}: {err}\n')
     except Exception as e:
@@ -453,12 +472,17 @@ try:
     w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
     token = w.config.authenticate()  # dict of headers, e.g. {'Authorization': 'Bearer ...'}
 
+    import ssl as _ssl
+    _ssl_ctx = _ssl.create_default_context()
+    _ssl_ctx.check_hostname = False
+    _ssl_ctx.verify_mode = _ssl.CERT_NONE
+
     base = host.rstrip('/')
     for catalog in sorted(catalogs):
         url = f'{base}/api/2.1/unity-catalog/permissions/catalog/{catalog}'
         req = urllib.request.Request(url, headers=token)
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=15, context=_ssl_ctx) as resp:
                 data = _json.loads(resp.read())
             principals = set()
             for pa in data.get('privilege_assignments', []):
@@ -549,7 +573,7 @@ except Exception as e:
 # import_id format: on_securable_type,on_securable_fullname,name  (required by provider)
 # Only emits policies that EXIST in Databricks (verified via REST API).
 extract_fgac_names() {
-  python3 -c "
+  python3 - << 'FEOF'
 import hcl2, sys, os
 
 def _str(v): return (v[0] if isinstance(v, list) else v or '').strip()
@@ -568,18 +592,14 @@ for p in cfg.get('fgac_policies', []):
 if not desired:
     sys.exit(0)
 
-# Check which policies actually exist via WorkspaceClient REST API
 auth = {}
 for fname in ['auth.auto.tfvars', '../auth.auto.tfvars']:
     if os.path.exists(fname):
-        try:
-            with open(fname) as f:
-                auth = hcl2.load(f)
-        except Exception:
-            pass
+        with open(fname) as f:
+            auth = hcl2.load(f)
         break
 
-existing_by_catalog = {}  # catalog -> set of full policy names (or None if unknown)
+existing_by_catalog = {}  # catalog -> set of full policy names, or None=unknown
 try:
     host          = _str(auth.get('databricks_workspace_host', ''))
     client_id     = _str(auth.get('databricks_client_id', ''))
@@ -587,13 +607,15 @@ try:
     from databricks.sdk import WorkspaceClient
     from databricks.sdk.service.catalog import SecurableType
     w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
-    catalogs = set(d[1] for d in desired)
-    for catalog in catalogs:
+    for catalog in set(d[1] for d in desired):
         try:
             policies = list(w.policy_infos.list_policy_infos_for_securable(
-                SecurableType.CATALOG, catalog))
+                securable_type=SecurableType.CATALOG,
+                securable_fullname=catalog,
+            ))
             existing_by_catalog[catalog] = {p.name for p in policies if p.name}
-        except Exception:
+        except Exception as e:
+            sys.stderr.write(f'WARNING: policy_infos list failed for {catalog}: {e}\n')
             existing_by_catalog[catalog] = None  # unknown — fall back
 except Exception as e:
     sys.stderr.write(f'WARNING: policy_infos check failed ({e}), falling back\n')
@@ -604,7 +626,7 @@ for (name, catalog, sec_type, full_name) in desired:
         continue  # policy does not exist yet — skip to avoid import error
     import_id = f'{sec_type},{catalog},{full_name}'
     print(name + '\t' + import_id)
-" 2>/dev/null || true
+FEOF
 }
 
 echo "============================================"

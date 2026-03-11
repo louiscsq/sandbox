@@ -376,6 +376,65 @@ def _try_destroy_account() -> None:
     _make("destroy", "ENV=account", check=False)
 
 
+def _force_delete_fgac_policies(*envs: str) -> None:
+    """Best-effort API-level deletion of all FGAC policies for all test catalogs.
+
+    Databricks enforces a limit of 10 ABAC policies per catalog.  If a previous
+    test run left orphaned policies (e.g. because terraform destroy partially
+    failed and the state file was then wiped), terraform apply in the next run
+    will fail with "estimated count exceeds limit".  This function proactively
+    deletes every policy_info it finds so each scenario starts from zero.
+    """
+    for env in envs:
+        auth_file = ENVS_DIR / env / "auth.auto.tfvars"
+        if not auth_file.exists():
+            continue
+        try:
+            import hcl2 as _hcl2
+            from databricks.sdk import WorkspaceClient as _WC
+            from databricks.sdk.service.catalog import SecurableType as _ST
+
+            def _s(v): return (v[0] if isinstance(v, list) else (v or "")).strip()
+
+            with open(auth_file) as f:
+                auth = _hcl2.load(f)
+            host          = _s(auth.get("databricks_workspace_host", ""))
+            client_id     = _s(auth.get("databricks_client_id", ""))
+            client_secret = _s(auth.get("databricks_client_secret", ""))
+            if not host:
+                continue
+            w = _WC(host=host, client_id=client_id, client_secret=client_secret)
+
+            # Only clean catalogs that look like test catalogs (dev_*, prod_*, bu2_*)
+            test_prefixes = ("dev_", "prod_", "bu2_")
+            try:
+                all_cats = [c.name for c in w.catalogs.list()
+                            if c.name and any(c.name.startswith(p) for p in test_prefixes)]
+            except Exception:
+                all_cats = []
+
+            for cat in all_cats:
+                try:
+                    policies = list(w.policy_infos.list_policy_infos_for_securable(
+                        securable_type=_ST.CATALOG,
+                        securable_fullname=cat,
+                    ))
+                    for p in policies:
+                        try:
+                            w.policy_infos.delete_policy_info(
+                                name=p.name,
+                                on_securable_type=_ST.CATALOG,
+                                on_securable_fullname=cat,
+                            )
+                            print(f"  Force-deleted orphaned FGAC policy: {cat}/{p.name}")
+                        except Exception as del_err:
+                            print(f"  WARN: could not delete FGAC policy {cat}/{p.name}: {del_err}")
+                except Exception:
+                    pass  # catalog may not support policy_infos; skip
+        except Exception as exc:
+            print(f"  WARN: force_delete_fgac_policies({env}) failed: {exc}")
+
+
 def _preamble_cleanup(*envs: str) -> None:
     """Best-effort pre-scenario cleanup.
 
@@ -389,6 +448,10 @@ def _preamble_cleanup(*envs: str) -> None:
     for env in envs:
         _try_destroy(env)
     _try_destroy_account()
+    # Force-delete any orphaned FGAC policies not tracked in Terraform state.
+    # Databricks enforces a hard limit of 10 policies/catalog; orphans from
+    # failed previous runs would cause "estimated count exceeds limit" errors.
+    _force_delete_fgac_policies(*envs)
     for env in envs:
         _clean_env_artifacts(env)
     _clean_account_artifacts()

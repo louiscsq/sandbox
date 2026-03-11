@@ -1063,20 +1063,70 @@ def autofix_fgac_policy_count(tfvars_path: Path) -> int:
     if not to_drop:
         return 0
 
-    # Remove each excess policy block from the HCL text.
-    # A policy block looks like:  {  ...  name = "..."  ...  }
-    # We locate each block by finding `name = "<dropped_name>"` and walk
-    # outward to find the enclosing { ... } pair.
+    # Remove each excess policy block from the HCL text using brace counting
+    # so that nested blocks (column_mask = { ... }, match_columns = [...]) are
+    # handled correctly.  A plain regex can't handle nested braces.
+    def _remove_block(txt: str, block_name: str) -> tuple[str, bool]:
+        """Find the policy block with `name = "block_name"` and remove it."""
+        name_pat = re.compile(r'name\s*=\s*"' + re.escape(block_name) + r'"')
+        m = name_pat.search(txt)
+        if not m:
+            return txt, False
+
+        pos = m.start()
+
+        # Walk backward from `name =` to find the opening { of the block.
+        depth = 0
+        block_start = None
+        i = pos - 1
+        while i >= 0:
+            c = txt[i]
+            if c == '}':
+                depth += 1
+            elif c == '{':
+                if depth == 0:
+                    block_start = i
+                    break
+                depth -= 1
+            i -= 1
+
+        if block_start is None:
+            return txt, False
+
+        # Walk forward from block_start to find the matching }.
+        depth = 0
+        block_end = None
+        i = block_start
+        while i < len(txt):
+            c = txt[i]
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    block_end = i
+                    break
+            i += 1
+
+        if block_end is None:
+            return txt, False
+
+        before = txt[:block_start]
+        after  = txt[block_end + 1:]
+
+        # Remove the comma that immediately follows the closing } (inter-item
+        # separator) — handles removing any element except the last.
+        after = re.sub(r'^\s*,', '', after)
+        # Also remove a trailing comma that now has nothing after it
+        # (handles removing the last element when a preceding element has a comma).
+        before = re.sub(r',(\s*)$', r'\1', before)
+
+        return before + after, True
+
     removed = 0
     for name in to_drop:
-        # Find the name assignment
-        pattern = re.compile(
-            r'\{\s*(?:[^{}]*?)\s*name\s*=\s*"' + re.escape(name) + r'"[^{}]*?\}',
-            re.DOTALL,
-        )
-        new_text, count = pattern.subn("", text, count=1)
-        if count:
-            text = new_text
+        text, did_remove = _remove_block(text, name)
+        if did_remove:
             removed += 1
 
     if removed:
