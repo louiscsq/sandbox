@@ -415,8 +415,12 @@ def fetch_tables_from_genie_space(space_id: str, auth_cfg: dict) -> tuple[list[s
 
     Returns (table_identifiers, genie_config_dict, space_title).
     Uses GET /api/2.0/genie/spaces/{space_id} and parses serialized_space.
+
+    Retries up to 5 times with backoff when serialized_space is empty —
+    Databricks may process it asynchronously immediately after creation.
     """
     import json as _json
+    import time as _time
 
     from databricks.sdk import WorkspaceClient
 
@@ -438,8 +442,25 @@ def fetch_tables_from_genie_space(space_id: str, auth_cfg: dict) -> tuple[list[s
     description = resp.get("description", "")
     serialized = resp.get("serialized_space", "")
 
+    # Genie Spaces may take a few seconds after creation before serialized_space
+    # is populated.  Retry with exponential backoff before giving up.
     if not serialized:
-        print(f"  WARNING: Genie Space {space_id} returned no serialized_space.")
+        for attempt, delay in enumerate([3, 5, 10, 15, 20], start=1):
+            print(f"  Genie Space {space_id} has no serialized_space yet — "
+                  f"retrying in {delay}s (attempt {attempt}/5)...")
+            _time.sleep(delay)
+            try:
+                resp = w.api_client.do("GET", f"/api/2.0/genie/spaces/{space_id}")
+                space_title = resp.get("title", space_title)
+                description = resp.get("description", description)
+                serialized = resp.get("serialized_space", "")
+            except Exception as e:
+                print(f"  WARNING: Retry failed: {e}")
+            if serialized:
+                break
+
+    if not serialized:
+        print(f"  WARNING: Genie Space {space_id} returned no serialized_space after retries.")
         return [], {}, space_title
 
     # --- Tables ---
@@ -525,12 +546,16 @@ def fetch_tables_from_databricks(
 def build_prompt(ddl_text: str,
                  catalog_schemas: list[tuple[str, str]] | None = None,
                  group_names: list[str] | None = None,
-                 per_space_name: str | None = None) -> str:
+                 per_space_name: str | None = None,
+                 space_names: list[str] | None = None) -> str:
     """Build the full prompt by injecting DDL and optional group names into the template.
 
     When per_space_name is set, an extra instruction is injected telling the LLM
     to generate ONLY config for that specific space (skip groups and tag_policies,
     which are shared state established by full generation).
+
+    When space_names is set, the LLM is told to use exactly those names as the
+    keys in genie_space_configs — preventing it from inventing its own titles.
     """
     template = PROMPT_TEMPLATE_PATH.read_text()
 
@@ -558,6 +583,18 @@ def build_prompt(ddl_text: str,
             groups_lines += f"  - {g}\n"
         groups_lines += "\n"
 
+    space_names_lines = ""
+    if space_names:
+        space_names_lines = (
+            "\n### REQUIRED GENIE SPACE NAMES\n\n"
+            "Use EXACTLY these name(s) as the keys in `genie_space_configs`. "
+            "Do NOT rename, merge, or invent alternative titles. "
+            "Each name must appear verbatim as a map key.\n\n"
+        )
+        for name in space_names:
+            space_names_lines += f"  - \"{name}\"\n"
+        space_names_lines += "\n"
+
     per_space_instruction = ""
     if per_space_name:
         per_space_instruction = (
@@ -576,12 +613,13 @@ def build_prompt(ddl_text: str,
     if idx == -1:
         print("WARNING: Could not find '### MY TABLES' in ABAC_PROMPT.md")
         print("  Appending DDL at the end of the prompt instead.\n")
-        prompt = template + f"\n\n{per_space_instruction}{groups_lines}{cs_lines}\n\n{ddl_text}\n"
+        prompt = template + f"\n\n{per_space_instruction}{groups_lines}{space_names_lines}{cs_lines}\n\n{ddl_text}\n"
     else:
         prompt_body = template[:idx].rstrip()
         user_input = (
             f"\n\n{per_space_instruction}"
             f"{groups_lines}"
+            f"{space_names_lines}"
             f"### MY TABLES\n\n"
             f"{cs_lines}\n"
             f"```sql\n{ddl_text}\n```\n"
@@ -1307,11 +1345,24 @@ def main():
         src = "auto-loaded from account config" if target_space_cfg is not None and not args.groups.startswith(args.groups) else "--groups CLI"
         print(f"  Groups:   {', '.join(group_names)} ({src})")
 
+    # Collect space names from config so the LLM uses them verbatim as
+    # genie_space_configs keys instead of inventing its own titles.
+    configured_space_names: list[str] | None = None
+    if not args.tables:
+        _spaces = auth_cfg.get("genie_spaces", [])
+        if target_space_cfg is not None:
+            # Per-space mode: only the target space name matters
+            _spaces = [target_space_cfg]
+        names = [s.get("name") for s in _spaces if s.get("name")]
+        if names:
+            configured_space_names = names
+
     prompt = build_prompt(
         ddl_text,
         catalog_schemas=catalog_schemas,
         group_names=group_names,
         per_space_name=args.space if args.space else None,
+        space_names=configured_space_names,
     )
 
     if args.dry_run:
