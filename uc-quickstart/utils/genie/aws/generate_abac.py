@@ -48,8 +48,7 @@ import threading
 import time
 from pathlib import Path
 
-PRODUCT_NAME = "genierails"
-PRODUCT_VERSION = "0.1.0"
+from telemetry import PRODUCT_NAME, PRODUCT_VERSION, verify_workspace_client, log_telemetry, telemetry_logger
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROMPT_TEMPLATE_PATH = SCRIPT_DIR / "ABAC_PROMPT.md"
@@ -193,6 +192,8 @@ def fetch_tables_from_databricks(
 
     configure_databricks_env(auth_cfg)
     w = WorkspaceClient(product=PRODUCT_NAME, product_version=PRODUCT_VERSION)
+    verify_workspace_client(w)
+    log_telemetry(w, "action", "fetch_tables")
 
     tables = []
     for ref in table_refs:
@@ -515,6 +516,8 @@ def call_databricks(prompt: str, model: str) -> str:
 
     cfg = Config(http_timeout_seconds=600, product=PRODUCT_NAME, product_version=PRODUCT_VERSION)
     w = WorkspaceClient(config=cfg)
+    verify_workspace_client(w)
+    log_telemetry(w, "action", "call_databricks_fmapi")  # inline — no ws in signature
     print(f"  Calling Databricks FMAPI ({model})...")
 
     response = w.serving_endpoints.query(

@@ -17,8 +17,7 @@ import re
 import subprocess
 import sys
 
-PRODUCT_NAME = "genierails"
-PRODUCT_VERSION = "0.1.0"
+from telemetry import PRODUCT_NAME, PRODUCT_VERSION, verify_workspace_client, log_telemetry, telemetry_logger
 
 REQUIRED_PACKAGES = {"databricks-sdk": "databricks.sdk"}
 
@@ -94,6 +93,8 @@ def extract_function_name(stmt: str) -> str:
 
 def deploy(sql_file: str, warehouse_id: str) -> None:
     w = WorkspaceClient(product=PRODUCT_NAME, product_version=PRODUCT_VERSION)
+    verify_workspace_client(w)
+    log_telemetry(w, "action", "deploy_masking_functions")
 
     with open(sql_file) as f:
         sql_text = f.read()
@@ -145,6 +146,8 @@ def deploy(sql_file: str, warehouse_id: str) -> None:
 
 def drop(sql_file: str, warehouse_id: str) -> None:
     w = WorkspaceClient(product=PRODUCT_NAME, product_version=PRODUCT_VERSION)
+    verify_workspace_client(w)
+    log_telemetry(w, "action", "drop_masking_functions")
 
     with open(sql_file) as f:
         sql_text = f.read()

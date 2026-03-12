@@ -15,6 +15,8 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
+sys.path.insert(0, str(PROJECT_DIR))
+from telemetry import PRODUCT_NAME, PRODUCT_VERSION, verify_workspace_client, log_telemetry, telemetry_logger
 
 
 def _load_auth():
@@ -63,7 +65,9 @@ def main():
 
     from databricks.sdk import WorkspaceClient
     from databricks.sdk.service.tags import TagPolicy, Value
-    w = WorkspaceClient(product="genierails", product_version="0.1.0")
+    w = WorkspaceClient(product=PRODUCT_NAME, product_version=PRODUCT_VERSION)
+    verify_workspace_client(w)
+    log_telemetry(w, "action", "sync_tag_policies")  # inline — ws created mid-function
 
     existing = {}
     for tp in w.tag_policies.list_tag_policies():
