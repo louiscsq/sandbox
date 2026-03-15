@@ -85,14 +85,13 @@ SETUP_SQL = f"""
 -- CATALOG: {FIN_CATALOG}  (finance domain)
 -- ============================================================
 
-CREATE CATALOG IF NOT EXISTS {FIN_CATALOG}
-  COMMENT 'Finance domain — dev environment. Promotion target: prod_fin.';
-
 CREATE SCHEMA IF NOT EXISTS {FIN_CATALOG}.finance
   COMMENT 'Core finance tables: customers, transactions, credit cards.';
 
 -- Customers — PII-rich table used for masking policy testing
-CREATE TABLE IF NOT EXISTS {FIN_CATALOG}.finance.customers (
+-- CREATE OR REPLACE ensures a fresh table with no orphaned column tags from
+-- previous test runs (orphaned tags cause ABAC evaluation failures on INSERT).
+CREATE OR REPLACE TABLE {FIN_CATALOG}.finance.customers (
   customer_id     BIGINT      NOT NULL COMMENT 'Unique customer identifier',
   first_name      STRING      NOT NULL COMMENT 'First name (PII)',
   last_name       STRING      NOT NULL COMMENT 'Last name (PII)',
@@ -112,7 +111,7 @@ COMMENT 'Customer master — contains PII. Masking required for non-compliance r
 TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 
 -- Transactions — AML-relevant financial activity
-CREATE TABLE IF NOT EXISTS {FIN_CATALOG}.finance.transactions (
+CREATE OR REPLACE TABLE {FIN_CATALOG}.finance.transactions (
   transaction_id   BIGINT     NOT NULL COMMENT 'Unique transaction ID',
   customer_id      BIGINT     NOT NULL COMMENT 'FK → customers.customer_id',
   amount           DECIMAL(18,2) COMMENT 'Transaction amount in USD',
@@ -131,7 +130,7 @@ COMMENT 'All customer transactions. AML-flagged rows restricted to compliance ro
 TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 
 -- Credit cards — PCI-scoped table
-CREATE TABLE IF NOT EXISTS {FIN_CATALOG}.finance.credit_cards (
+CREATE OR REPLACE TABLE {FIN_CATALOG}.finance.credit_cards (
   card_id          BIGINT     NOT NULL COMMENT 'Unique card ID',
   customer_id      BIGINT     NOT NULL COMMENT 'FK → customers.customer_id',
   card_number      STRING     COMMENT 'Full 16-digit card number — PCI restricted',
@@ -152,14 +151,11 @@ TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 -- CATALOG: {CLINICAL_CATALOG}  (clinical domain)
 -- ============================================================
 
-CREATE CATALOG IF NOT EXISTS {CLINICAL_CATALOG}
-  COMMENT 'Clinical domain — dev environment. Promotion target: prod_clinical.';
-
 CREATE SCHEMA IF NOT EXISTS {CLINICAL_CATALOG}.clinical
   COMMENT 'Core clinical tables: patients, encounters.';
 
 -- Patients — PHI-rich demographics table
-CREATE TABLE IF NOT EXISTS {CLINICAL_CATALOG}.clinical.patients (
+CREATE OR REPLACE TABLE {CLINICAL_CATALOG}.clinical.patients (
   patient_id         BIGINT   NOT NULL COMMENT 'Unique patient identifier',
   first_name         STRING   NOT NULL COMMENT 'First name (PHI)',
   last_name          STRING   NOT NULL COMMENT 'Last name (PHI)',
@@ -182,7 +178,7 @@ COMMENT 'Patient demographics — HIPAA PHI. All PII columns require masking out
 TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 
 -- Encounters — clinical visit records (PHI + clinical notes)
-CREATE TABLE IF NOT EXISTS {CLINICAL_CATALOG}.clinical.encounters (
+CREATE OR REPLACE TABLE {CLINICAL_CATALOG}.clinical.encounters (
   encounter_id       BIGINT   NOT NULL COMMENT 'Unique encounter ID',
   patient_id         BIGINT   NOT NULL COMMENT 'FK → patients.patient_id',
   encounter_date     DATE     NOT NULL,
@@ -295,13 +291,10 @@ PROD_SETUP_SQL = f"""
 -- CATALOG: {PROD_FIN_CATALOG}  (finance domain — prod)
 -- ============================================================
 
-CREATE CATALOG IF NOT EXISTS {PROD_FIN_CATALOG}
-  COMMENT 'Finance domain — prod environment. Promoted from dev_fin.';
-
 CREATE SCHEMA IF NOT EXISTS {PROD_FIN_CATALOG}.finance
   COMMENT 'Core finance tables: customers, transactions, credit cards.';
 
-CREATE TABLE IF NOT EXISTS {PROD_FIN_CATALOG}.finance.customers (
+CREATE OR REPLACE TABLE {PROD_FIN_CATALOG}.finance.customers (
   customer_id     BIGINT      NOT NULL COMMENT 'Unique customer identifier',
   first_name      STRING      NOT NULL COMMENT 'First name (PII)',
   last_name       STRING      NOT NULL COMMENT 'Last name (PII)',
@@ -320,7 +313,7 @@ CREATE TABLE IF NOT EXISTS {PROD_FIN_CATALOG}.finance.customers (
 COMMENT 'Customer master — prod. Contains PII. Masking required for non-compliance roles.'
 TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 
-CREATE TABLE IF NOT EXISTS {PROD_FIN_CATALOG}.finance.transactions (
+CREATE OR REPLACE TABLE {PROD_FIN_CATALOG}.finance.transactions (
   transaction_id   BIGINT     NOT NULL COMMENT 'Unique transaction ID',
   customer_id      BIGINT     NOT NULL COMMENT 'FK → customers.customer_id',
   amount           DECIMAL(18,2) COMMENT 'Transaction amount in USD',
@@ -338,7 +331,7 @@ CREATE TABLE IF NOT EXISTS {PROD_FIN_CATALOG}.finance.transactions (
 COMMENT 'All customer transactions — prod. AML-flagged rows restricted to compliance roles.'
 TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 
-CREATE TABLE IF NOT EXISTS {PROD_FIN_CATALOG}.finance.credit_cards (
+CREATE OR REPLACE TABLE {PROD_FIN_CATALOG}.finance.credit_cards (
   card_id          BIGINT     NOT NULL COMMENT 'Unique card ID',
   customer_id      BIGINT     NOT NULL COMMENT 'FK → customers.customer_id',
   card_number      STRING     COMMENT 'Full 16-digit card number — PCI restricted',
@@ -359,13 +352,10 @@ TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 -- CATALOG: {PROD_CLINICAL_CATALOG}  (clinical domain — prod)
 -- ============================================================
 
-CREATE CATALOG IF NOT EXISTS {PROD_CLINICAL_CATALOG}
-  COMMENT 'Clinical domain — prod environment. Promoted from dev_clinical.';
-
 CREATE SCHEMA IF NOT EXISTS {PROD_CLINICAL_CATALOG}.clinical
   COMMENT 'Core clinical tables: patients, encounters.';
 
-CREATE TABLE IF NOT EXISTS {PROD_CLINICAL_CATALOG}.clinical.patients (
+CREATE OR REPLACE TABLE {PROD_CLINICAL_CATALOG}.clinical.patients (
   patient_id         BIGINT   NOT NULL COMMENT 'Unique patient identifier',
   first_name         STRING   NOT NULL COMMENT 'First name (PHI)',
   last_name          STRING   NOT NULL COMMENT 'Last name (PHI)',
@@ -387,7 +377,7 @@ CREATE TABLE IF NOT EXISTS {PROD_CLINICAL_CATALOG}.clinical.patients (
 COMMENT 'Patient demographics — prod. HIPAA PHI. All PII columns require masking outside clinical staff.'
 TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 
-CREATE TABLE IF NOT EXISTS {PROD_CLINICAL_CATALOG}.clinical.encounters (
+CREATE OR REPLACE TABLE {PROD_CLINICAL_CATALOG}.clinical.encounters (
   encounter_id       BIGINT   NOT NULL COMMENT 'Unique encounter ID',
   patient_id         BIGINT   NOT NULL COMMENT 'FK → patients.patient_id',
   encounter_date     DATE     NOT NULL,
@@ -529,6 +519,38 @@ sql_warehouse_id = ""   # auto-create serverless warehouse
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _ensure_catalog(w, name: str, comment: str = "", storage_root: str | None = None) -> None:
+    """Create a catalog via the UC API.
+
+    When ``storage_root`` is provided (e.g. when running against a provisioned
+    test metastore that has no default storage), each catalog is placed at a
+    unique S3 subfolder under the External Location registered by
+    provision_test_env.py.  When ``storage_root`` is None the metastore's
+    default managed storage is used.
+    """
+    from databricks.sdk.errors import ResourceAlreadyExists
+
+    try:
+        kwargs: dict = {"name": name}
+        if comment:
+            kwargs["comment"] = comment
+        if storage_root:
+            kwargs["storage_root"] = storage_root
+        w.catalogs.create(**kwargs)
+        loc = f" → {storage_root}" if storage_root else ""
+        print(f"    Created catalog: {name}{loc}")
+    except ResourceAlreadyExists:
+        print(f"    Catalog already exists (skipping): {name}")
+    except Exception as exc:
+        # Tolerate "already exists" even when the SDK exception class doesn't
+        # match (can happen with older SDK builds or slightly different API shapes).
+        if "already exists" in str(exc).lower():
+            print(f"    Catalog already exists (skipping): {name}")
+        else:
+            print(f"    ERROR creating catalog {name!r}: {exc}")
+            sys.exit(1)
+
+
 def _ensure_packages():
     import subprocess
     for pkg in ("python-hcl2", "databricks-sdk"):
@@ -593,8 +615,22 @@ def _get_warehouse(w, warehouse_id: str) -> str:
         print(f"    Starting warehouse: {wh.name} ({wh.id})")
         return wh.id
 
-    print("ERROR: No SQL warehouses found. Create one in the Databricks UI first.")
-    sys.exit(1)
+    # No warehouse at all — create a serverless one on-demand.  This happens when
+    # a previous scenario's Terraform teardown deleted the only managed warehouse
+    # and the workspace Starter Warehouse was also removed by Databricks during
+    # that scenario's apply.  Rather than requiring a manual pre-created warehouse,
+    # we create a small serverless warehouse here so DDL can proceed immediately.
+    print("  No SQL warehouses found — creating a temporary serverless warehouse for DDL...")
+    from databricks.sdk.service.sql import EndpointInfoWarehouseType
+    wh = w.warehouses.create(
+        name="ABAC Test Setup Warehouse",
+        cluster_size="Small",
+        warehouse_type=EndpointInfoWarehouseType.PRO,
+        enable_serverless_compute=True,
+        auto_stop_mins=10,
+    ).result()
+    print(f"    Created warehouse: {wh.name} ({wh.id})")
+    return wh.id
 
 
 def _run_statement(w, warehouse_id: str, sql: str, description: str = "") -> None:
@@ -821,6 +857,21 @@ def main():
     auth_cfg = _load_auth(Path(args.auth_file))
     _configure_env(auth_cfg)
 
+    # catalog_storage_base is written by provision_test_env.py into the generated
+    # auth.auto.tfvars when a fresh test environment is provisioned.  When present
+    # each catalog is created with an explicit storage_root pointing to a unique
+    # subfolder under the External Location, so no metastore-level default storage
+    # is needed.  When absent (normal dev/prod environments), the metastore default
+    # storage is used and storage_root is left unset.
+    catalog_storage_base: str | None = auth_cfg.get("catalog_storage_base", [None])[0] \
+        if isinstance(auth_cfg.get("catalog_storage_base"), list) \
+        else auth_cfg.get("catalog_storage_base")
+
+    def _catalog_storage(catalog_name: str) -> str | None:
+        if not catalog_storage_base:
+            return None
+        return f"{catalog_storage_base.rstrip('/')}/{catalog_name}"
+
     w = WorkspaceClient(product="genierails-test-setup", product_version="0.1.0")
     warehouse_id = _get_warehouse(w, args.warehouse_id)
 
@@ -869,6 +920,10 @@ def main():
 
     # ── Dev setup ──────────────────────────────────────────────────────────
     print(f"\n  Creating dev catalogs, schemas, and tables...")
+    _ensure_catalog(w, FIN_CATALOG,      "Finance domain — dev. Promotion target: prod_fin.",
+                    storage_root=_catalog_storage(FIN_CATALOG))
+    _ensure_catalog(w, CLINICAL_CATALOG, "Clinical domain — dev. Promotion target: prod_clinical.",
+                    storage_root=_catalog_storage(CLINICAL_CATALOG))
     setup_stmts = _split_statements(SETUP_SQL)
     for i, stmt in enumerate(setup_stmts, 1):
         label = stmt.split("\n")[0].strip().lstrip("-").strip()
@@ -882,6 +937,10 @@ def main():
     # ── Prod setup (optional) ──────────────────────────────────────────────
     if args.prod:
         print(f"\n  Creating prod catalogs, schemas, and tables...")
+        _ensure_catalog(w, PROD_FIN_CATALOG,      "Finance domain — prod.",
+                        storage_root=_catalog_storage(PROD_FIN_CATALOG))
+        _ensure_catalog(w, PROD_CLINICAL_CATALOG, "Clinical domain — prod.",
+                        storage_root=_catalog_storage(PROD_CLINICAL_CATALOG))
         prod_setup_stmts = _split_statements(PROD_SETUP_SQL)
         for i, stmt in enumerate(prod_setup_stmts, 1):
             label = stmt.split("\n")[0].strip().lstrip("-").strip()

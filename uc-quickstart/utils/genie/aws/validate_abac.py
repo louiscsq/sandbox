@@ -102,6 +102,115 @@ def parse_sql_functions(path: Path) -> set[str]:
     return {m.group(1) for m in pattern.finditer(text)}
 
 
+def parse_sql_function_arg_counts(path: Path) -> dict[str, int]:
+    """Extract function names and their argument counts from SQL file.
+
+    Returns a dict mapping function name to argument count (0 for no args).
+    """
+    text = path.read_text()
+    pattern = re.compile(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+"
+        r"(?:[\w]+\.[\w]+\.)?"   # optional catalog.schema. prefix
+        r"([\w]+)\s*\(([^)]*)\)",
+        re.IGNORECASE,
+    )
+    result = {}
+    for m in pattern.finditer(text):
+        name = m.group(1)
+        args = m.group(2).strip()
+        result[name] = 0 if not args else len([a for a in args.split(",") if a.strip()])
+    return result
+
+
+def _extract_tag_refs(condition: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """Return (hasTagValue refs, hasTag refs) from a condition string."""
+    value_refs = re.findall(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", condition or "")
+    key_refs = re.findall(r"hasTag\(\s*'([^']+)'\s*\)", condition or "")
+    return value_refs, key_refs
+
+
+def _condition_matches_tags(condition: str, tags: dict[str, set[str]]) -> bool:
+    """Evaluate a limited ABAC condition against a tag context.
+
+    Supported syntax is intentionally narrow and matches the prompt / validator:
+    hasTagValue('k','v'), hasTag('k'), AND, OR, parentheses.
+    """
+    if not condition:
+        return True
+
+    expr = condition
+
+    def repl_value(match: re.Match) -> str:
+        key, value = match.group(1), match.group(2)
+        return str(value in tags.get(key, set()))
+
+    def repl_key(match: re.Match) -> str:
+        key = match.group(1)
+        return str(key in tags and bool(tags[key]))
+
+    expr = re.sub(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", repl_value, expr)
+    expr = re.sub(r"hasTag\(\s*'([^']+)'\s*\)", repl_key, expr)
+    expr = re.sub(r"\bAND\b", " and ", expr)
+    expr = re.sub(r"\bOR\b", " or ", expr)
+
+    # Refuse anything outside the expected boolean grammar.
+    if re.search(r"[^()\sA-Za-z]", expr):
+        return False
+
+    try:
+        return bool(eval(expr, {"__builtins__": {}}, {}))
+    except Exception:
+        return False
+
+
+def _entity_table_name(entity_type: str, entity_name: str) -> str:
+    if entity_type == "tables":
+        return entity_name
+    if entity_type == "columns":
+        return ".".join(entity_name.split(".")[:3])
+    return ""
+
+
+def _value_requires_coverage(tag_value: str) -> bool:
+    return tag_value.strip().lower() not in {"public", "general", "exact"}
+
+
+def _infer_column_categories(entity_name: str) -> set[str]:
+    col = entity_name.split(".")[-1].lower()
+    categories: set[str] = set()
+    if "email" in col:
+        categories.add("email")
+    if "phone" in col or "mobile" in col:
+        categories.add("phone")
+    if "ssn" in col or "social_security" in col:
+        categories.add("ssn")
+    if "name" in col:
+        categories.add("name")
+    if "address" in col:
+        categories.add("address")
+    if "birth" in col or col in {"dob", "date_of_birth"}:
+        categories.add("date")
+    if "card" in col or "cvv" in col or "pan" in col:
+        categories.add("card")
+    if "amount" in col or "balance" in col or "limit" in col:
+        categories.add("amount")
+    return categories or {"generic"}
+
+
+GENERIC_SAFE_FUNCTIONS = {"mask_pii_partial", "mask_redact", "mask_nullify", "mask_hash"}
+FUNCTION_EXPECTED_CATEGORIES = {
+    "mask_email": {"email"},
+    "mask_phone": {"phone"},
+    "mask_ssn": {"ssn"},
+    "mask_full_name": {"name"},
+    "mask_credit_card_full": {"card"},
+    "mask_credit_card_last4": {"card"},
+    "mask_amount_rounded": {"amount"},
+    "mask_date_to_year": {"date"},
+    "mask_timestamp_to_day": {"date"},
+}
+
+
 def validate_groups(cfg: dict, result: ValidationResult):
     groups = cfg.get("groups")
     if not groups:
@@ -147,6 +256,7 @@ def validate_tag_assignments(cfg: dict, tag_map: dict[str, set[str]], result: Va
         result.error("'tag_assignments' must be a list")
         return
     seen_keys: set[str] = set()
+    entity_tag_values: dict[tuple[str, str, str], set[str]] = {}
     for i, ta in enumerate(assignments):
         prefix = f"tag_assignments[{i}]"
         etype = ta.get("entity_type", "")
@@ -182,6 +292,15 @@ def validate_tag_assignments(cfg: dict, tag_map: dict[str, set[str]], result: Va
             result.warn(f"{prefix}: duplicate assignment ({etype}, {ename}, {tkey}={tval})")
         seen_keys.add(composite)
 
+        if etype and ename and tkey and tval:
+            bucket = entity_tag_values.setdefault((etype, ename, tkey), set())
+            bucket.add(tval)
+            if len(bucket) > 1:
+                result.error(
+                    f"{prefix}: entity '{ename}' has multiple values for tag_key '{tkey}' "
+                    f"({sorted(bucket)}). Choose exactly one value per tag_key per entity."
+                )
+
     result.ok(f"tag_assignments: {len(assignments)} assignment(s)")
 
 
@@ -191,6 +310,7 @@ def validate_fgac_policies(
     tag_map: dict[str, set[str]],
     sql_functions: set[str] | None,
     result: ValidationResult,
+    sql_function_arg_counts: dict[str, int] | None = None,
 ):
     policies = cfg.get("fgac_policies", [])
     if not isinstance(policies, list):
@@ -266,6 +386,23 @@ def validate_fgac_policies(
                     f"{prefix}: function_name '{fn}' should be relative (no dots) — "
                     f"Terraform prepends catalog.schema automatically"
                 )
+            # Validate function argument count matches policy type.
+            # Row filters use `using = []` so the function must take 0 args.
+            # Column masks get the column passed implicitly via on_column,
+            # so the function must take exactly 1 arg.
+            if sql_function_arg_counts and fn in sql_function_arg_counts:
+                argc = sql_function_arg_counts[fn]
+                if ptype == "POLICY_TYPE_ROW_FILTER" and argc != 0:
+                    result.warn(
+                        f"{prefix}: ROW_FILTER function '{fn}' takes {argc} argument(s) "
+                        f"but row filters require 0-argument functions. Use a dedicated "
+                        f"filter function (e.g. filter_<name>()) that returns BOOLEAN."
+                    )
+                elif ptype == "POLICY_TYPE_COLUMN_MASK" and argc != 1:
+                    result.warn(
+                        f"{prefix}: COLUMN_MASK function '{fn}' takes {argc} argument(s) "
+                        f"but column masks require exactly 1-argument functions."
+                    )
 
     # Cross-reference with SQL file
     if sql_functions is not None:
@@ -280,6 +417,88 @@ def validate_fgac_policies(
             result.warn(
                 f"SQL file defines functions not used by any policy: {sorted(unused)}. "
                 f"These will be created but won't mask anything."
+            )
+
+    # Coverage gap analysis and function/category safety checks.
+    assignments = cfg.get("tag_assignments", [])
+    entity_tags: dict[tuple[str, str], dict[str, set[str]]] = {}
+    for ta in assignments:
+        etype = ta.get("entity_type", "")
+        ename = ta.get("entity_name", "")
+        tkey = ta.get("tag_key", "")
+        tval = ta.get("tag_value", "")
+        if not (etype and ename and tkey and tval):
+            continue
+        per_entity = entity_tags.setdefault((etype, ename), {})
+        per_entity.setdefault(tkey, set()).add(tval)
+
+    def policy_matches_assignment(policy: dict, assignment: dict) -> bool:
+        policy_catalog = policy.get("catalog", "") or policy.get("function_catalog", "")
+        entity_name = assignment.get("entity_name", "")
+        entity_type = assignment.get("entity_type", "")
+        entity_catalog = entity_name.split(".")[0] if entity_name else ""
+        if policy_catalog and entity_catalog and policy_catalog != entity_catalog:
+            return False
+
+        table_name = _entity_table_name(entity_type, entity_name)
+        table_tags = entity_tags.get(("tables", table_name), {})
+        if entity_type == "columns":
+            if policy.get("policy_type") != "POLICY_TYPE_COLUMN_MASK":
+                return False
+            column_tags = entity_tags.get(("columns", entity_name), {})
+            if not _condition_matches_tags(policy.get("match_condition", ""), column_tags):
+                return False
+            return _condition_matches_tags(policy.get("when_condition", ""), table_tags)
+
+        if entity_type == "tables":
+            when_condition = policy.get("when_condition", "")
+            if not when_condition:
+                return False
+            return _condition_matches_tags(when_condition, table_tags)
+
+        return False
+
+    for i, ta in enumerate(assignments):
+        tval = ta.get("tag_value", "")
+        if not _value_requires_coverage(tval):
+            continue
+        if not any(policy_matches_assignment(p, ta) for p in policies):
+            result.error(
+                f"tag_assignments[{i}]: non-public tag '{ta.get('tag_key')}={tval}' on "
+                f"'{ta.get('entity_name')}' is not covered by any active fgac_policy"
+            )
+
+    # Detect unsafe tag/function mismatches, especially heterogeneous contact collapse.
+    assignments_by_tag: dict[tuple[str, str], list[dict]] = {}
+    for ta in assignments:
+        if ta.get("entity_type") != "columns":
+            continue
+        assignments_by_tag.setdefault((ta.get("tag_key", ""), ta.get("tag_value", "")), []).append(ta)
+
+    for p in policies:
+        if p.get("policy_type") != "POLICY_TYPE_COLUMN_MASK":
+            continue
+        fn = p.get("function_name", "")
+        if fn in GENERIC_SAFE_FUNCTIONS:
+            continue
+        value_refs, key_refs = _extract_tag_refs(p.get("match_condition", ""))
+        matched_assignments: list[dict] = []
+        for key, value in value_refs:
+            matched_assignments.extend(assignments_by_tag.get((key, value), []))
+        for key in key_refs:
+            for (tag_key, _tag_value), items in assignments_by_tag.items():
+                if tag_key == key:
+                    matched_assignments.extend(items)
+        if not matched_assignments:
+            continue
+        categories = set()
+        for ta in matched_assignments:
+            categories.update(_infer_column_categories(ta.get("entity_name", "")))
+        expected = FUNCTION_EXPECTED_CATEGORIES.get(fn)
+        if expected and not categories.issubset(expected):
+            result.error(
+                f"fgac policy '{p.get('name', '')}' uses function '{fn}' for columns with "
+                f"categories {sorted(categories)}; expected only {sorted(expected)}"
             )
 
     result.ok(f"fgac_policies: {len(policies)} policy/ies, {len(referenced_functions)} unique function(s)")
@@ -445,11 +664,13 @@ def main():
 
     # --- Parse SQL (optional) ---
     sql_functions: set[str] | None = None
+    sql_function_arg_counts: dict[str, int] | None = None
     if sql_path:
         if not sql_path.exists():
             result.error(f"SQL file {sql_path} not found")
         else:
             sql_functions = parse_sql_functions(sql_path)
+            sql_function_arg_counts = parse_sql_function_arg_counts(sql_path)
             if not sql_functions:
                 result.warn(
                     f"No CREATE FUNCTION statements found in {sql_path} — "
@@ -465,7 +686,8 @@ def main():
     group_names = validate_groups(merged_cfg, result)
     tag_map = validate_tag_policies(merged_cfg, result)
     validate_tag_assignments(merged_cfg, tag_map, result)
-    validate_fgac_policies(merged_cfg, group_names, tag_map, sql_functions, result)
+    validate_fgac_policies(merged_cfg, group_names, tag_map, sql_functions, result,
+                           sql_function_arg_counts=sql_function_arg_counts)
     validate_group_members(merged_cfg, group_names, result)
 
     result.print_report()

@@ -111,7 +111,7 @@ Recommended for most teams.
 1. A developer runs:
 
    ```bash
-   make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG=prod_catalog
+   make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_catalog=prod_catalog"
    ```
 
 2. The promoted config is reviewed and committed
@@ -132,17 +132,6 @@ Use this for separate business units or environments that should not inherit `de
 
 2. The generated config is reviewed and committed
 3. CI validates and applies `ENV=bu2`
-
-## Example Deployment Pattern
-
-For most teams, the pipeline looks like:
-
-1. Developer updates `env.auto.tfvars` or generated config
-2. Developer reviews and commits the split config files
-3. Pull request runs validation and optionally plan
-4. Merge to deployment branch
-5. CI writes `auth.auto.tfvars` from secrets
-6. CI runs `make apply ENV=<env>`
 
 ## Ready-to-Use GitHub Actions Workflows
 

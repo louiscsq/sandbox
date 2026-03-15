@@ -59,6 +59,7 @@ from databricks.sdk import WorkspaceClient  # noqa: E402
 from databricks.sdk.service.catalog import (  # noqa: E402
     PermissionsChange,
     Privilege,
+    SecurableType,
 )
 from databricks.sdk.service.sql import (  # noqa: E402
     StatementState,
@@ -108,7 +109,7 @@ def extract_function_name(stmt: str) -> str:
 
 
 def _get_existing_privileges(
-    w: WorkspaceClient, securable_type: str, full_name: str, principal: str
+    w: WorkspaceClient, securable_type: SecurableType, full_name: str, principal: str
 ) -> set[Privilege]:
     try:
         resp = w.grants.get(
@@ -144,7 +145,7 @@ def _ensure_drop_permissions(
     )
 
     for catalog in catalogs:
-        existing = _get_existing_privileges(w, "CATALOG", catalog, principal)
+        existing = _get_existing_privileges(w, SecurableType.CATALOG, catalog, principal)
         missing = (
             [Privilege.USE_CATALOG]
             if Privilege.USE_CATALOG not in existing
@@ -156,16 +157,36 @@ def _ensure_drop_permissions(
             f"  Ensuring SP access on catalog {catalog} "
             f"({', '.join(p.value for p in missing)})..."
         )
-        w.grants.update(
-            securable_type="CATALOG",
-            full_name=catalog,
-            changes=[PermissionsChange(principal=principal, add=missing)],
-        )
-        grants_added.append(("CATALOG", catalog, missing))
+        try:
+            w.grants.update(
+                securable_type=SecurableType.CATALOG,
+                full_name=catalog,
+                changes=[PermissionsChange(principal=principal, add=missing)],
+            )
+        except Exception as exc:
+            exc_lower = str(exc).lower()
+            if "not found" in exc_lower or "does not exist" in exc_lower:
+                print(f"  Catalog {catalog} does not exist — skipping.")
+                continue
+            if (
+                "not a valid securable type" in exc_lower
+                or "invalid" in exc_lower
+                or "securabletype" in exc_lower
+            ):
+                # Some catalog types (e.g. managed catalogs) reject
+                # grants.update() with CATALOG securable_type.  The SP likely
+                # already has permission; proceed and let DROP fail naturally.
+                print(
+                    f"  WARNING: Could not ensure USE_CATALOG on {catalog} "
+                    f"({exc}); proceeding without it."
+                )
+                continue
+            raise
+        grants_added.append((SecurableType.CATALOG, catalog, missing))
 
     for catalog, schema in schemas:
         full_name = f"{catalog}.{schema}"
-        existing = _get_existing_privileges(w, "SCHEMA", full_name, principal)
+        existing = _get_existing_privileges(w, SecurableType.SCHEMA, full_name, principal)
         missing = (
             [Privilege.USE_SCHEMA]
             if Privilege.USE_SCHEMA not in existing
@@ -177,18 +198,35 @@ def _ensure_drop_permissions(
             f"  Ensuring SP access on schema {full_name} "
             f"({', '.join(p.value for p in missing)})..."
         )
-        w.grants.update(
-            securable_type="SCHEMA",
-            full_name=full_name,
-            changes=[PermissionsChange(principal=principal, add=missing)],
-        )
-        grants_added.append(("SCHEMA", full_name, missing))
+        try:
+            w.grants.update(
+                securable_type=SecurableType.SCHEMA,
+                full_name=full_name,
+                changes=[PermissionsChange(principal=principal, add=missing)],
+            )
+        except Exception as exc:
+            exc_lower = str(exc).lower()
+            if "not found" in exc_lower or "does not exist" in exc_lower:
+                print(f"  Schema {full_name} does not exist — skipping.")
+                continue
+            if (
+                "not a valid securable type" in exc_lower
+                or "invalid" in exc_lower
+                or "securabletype" in exc_lower
+            ):
+                print(
+                    f"  WARNING: Could not ensure USE_SCHEMA on {full_name} "
+                    f"({exc}); proceeding without it."
+                )
+                continue
+            raise
+        grants_added.append((SecurableType.SCHEMA, full_name, missing))
 
     return grants_added
 
 
 def _cleanup_drop_permissions(
-    w: WorkspaceClient, grants_added: list[tuple[str, str, list[Privilege]]]
+    w: WorkspaceClient, grants_added: list[tuple[SecurableType, str, list[Privilege]]]
 ) -> None:
     for securable_type, full_name, privileges in reversed(grants_added):
         try:
@@ -204,7 +242,7 @@ def _cleanup_drop_permissions(
             )
         except Exception as exc:
             print(
-                f"  WARNING: failed to remove temporary {securable_type.lower()} "
+                f"  WARNING: failed to remove temporary {securable_type.value.lower()} "
                 f"grants on {full_name}: {exc}"
             )
 
@@ -299,6 +337,10 @@ def drop(sql_file: str, warehouse_id: str) -> None:
                     wait_timeout="30s",
                 )
             except Exception as e:
+                err_str = str(e).lower()
+                if "not found" in err_str or "does not exist" in err_str:
+                    print("SKIP (not found)")
+                    continue
                 print(f"ERROR: {e}")
                 failed += 1
                 continue
@@ -310,6 +352,10 @@ def drop(sql_file: str, warehouse_id: str) -> None:
                 error_msg = ""
                 if resp.status.error:
                     error_msg = resp.status.error.message or str(resp.status.error)
+                err_lower = error_msg.lower()
+                if "not found" in err_lower or "does not exist" in err_lower:
+                    print("SKIP (not found)")
+                    continue
                 print(f"FAILED ({state.value}): {error_msg}")
                 failed += 1
     finally:

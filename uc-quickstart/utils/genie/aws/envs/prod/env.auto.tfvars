@@ -1,7 +1,7 @@
 genie_spaces = [
   {
     name             = "Finance Analytics"
-    genie_space_id   = ""
+    genie_space_id   = "01f11eb6906e1b1b8b7b159c0d19bed4"
     sql_warehouse_id = ""
     uc_tables = [
       "prod_fin.finance.customers",
@@ -9,15 +9,6 @@ genie_spaces = [
       "prod_fin.finance.credit_cards",
     ]
   },
-  {
-    name             = "Clinical Analytics"
-    genie_space_id   = ""
-    sql_warehouse_id = ""
-    uc_tables = [
-      "prod_clinical.clinical.patients",
-      "prod_clinical.clinical.encounters",
-    ]
-  },
 ]
 
-sql_warehouse_id = ""
+sql_warehouse_id = "4d561fc62efa095a"

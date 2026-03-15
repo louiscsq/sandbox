@@ -1,6 +1,27 @@
 # ============================================================================
 # GENERATED DRAFT ABAC CONFIG — source for promote
 # ============================================================================
+#
+# Operating modes (set when running make generate):
+#
+#   make generate                    Full generation (default) — groups + ABAC + Genie configs.
+#                                    Use for centralized teams that own everything.
+#
+#   make generate MODE=governance    ABAC-only generation — groups, tag_policies,
+#                                    tag_assignments, fgac_policies, masking functions.
+#                                    genie_space_configs is suppressed (BU teams own it).
+#                                    Use with: make apply-governance ENV=<env>
+#
+#   make generate MODE=genie         Genie-only generation — genie_space_configs
+#                                    (instructions, benchmarks, measures, sample questions).
+#                                    All ABAC sections and masking SQL are suppressed.
+#                                    Existing groups are auto-loaded from the account layer.
+#                                    Use with: make apply-genie ENV=<env>
+#
+# For the decentralized governance pattern (central ABAC team + independent BU Genie teams)
+# see docs/decentralized.md.
+#
+# ============================================================================
 # `make generate` writes a full draft into `envs/<env>/generated/abac.auto.tfvars`.
 # `make promote` then splits that draft into:
 #   - `envs/account/abac.auto.tfvars`

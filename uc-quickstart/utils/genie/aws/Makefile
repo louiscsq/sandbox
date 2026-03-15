@@ -1,4 +1,4 @@
-.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate validate validate-generated promote plan sync-tags apply import migrate-state destroy clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer
+.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate validate validate-generated promote plan sync-tags apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci
 
 SHELL := /bin/bash
 export DATABRICKS_USER_AGENT_EXTRA := genierails/0.1.0
@@ -18,11 +18,19 @@ DEST_CATALOG_MAP ?=
 # regenerated. Existing tuned config for other spaces is preserved.
 # Example: make generate SPACE="Finance Analytics"
 SPACE ?=
+# Optional: generation mode for decentralized deployments.
+# governance — generate ABAC only (groups, tags, policies, masking); no genie_space_configs
+# genie      — generate Genie space configs only (instructions, benchmarks, measures); no ABAC
+# (empty)    — full generation (default, current behavior)
+# Example: make generate MODE=governance   (central governance team)
+#          make generate MODE=genie        (BU team creating Genie spaces)
+MODE ?=
 ENV_ORIGIN := $(origin ENV)
 MODULE_ROOT := $(shell cd "$(dir $(realpath $(lastword $(MAKEFILE_LIST))))" && pwd)
-ENV_DIR := $(MODULE_ROOT)/envs/$(ENV)
-SOURCE_ENV_DIR := $(MODULE_ROOT)/envs/$(SOURCE_ENV)
-ACCOUNT_ENV_DIR := $(MODULE_ROOT)/envs/$(ACCOUNT_ENV)
+ENV_DIR ?= $(MODULE_ROOT)/envs/$(ENV)
+SOURCE_ENV_DIR ?= $(MODULE_ROOT)/envs/$(SOURCE_ENV)
+DEST_ENV_DIR ?= $(MODULE_ROOT)/envs/$(DEST_ENV)
+ACCOUNT_ENV_DIR ?= $(MODULE_ROOT)/envs/$(ACCOUNT_ENV)
 ROOT_RUNNER := $(MODULE_ROOT)/scripts/terraform_layer.sh
 TARGET_ENV_NAME = $(if $(TARGET_ENV),$(TARGET_ENV),$(ENV))
 TARGET_ENV_DIR = $(MODULE_ROOT)/envs/$(TARGET_ENV_NAME)
@@ -64,7 +72,11 @@ _prepare-env:
 		envs="$(ACCOUNT_ENV) $(ENV)"; \
 	fi; \
 	for env_name in $$envs; do \
-		env_dir="$(MODULE_ROOT)/envs/$$env_name"; \
+		if [ "$$env_name" = "$(ENV)" ] && [ "$(ENV_DIR)" != "$(MODULE_ROOT)/envs/$(ENV)" ]; then \
+			env_dir="$(ENV_DIR)"; \
+		else \
+			env_dir="$(MODULE_ROOT)/envs/$$env_name"; \
+		fi; \
 		mkdir -p "$$env_dir"; \
 		if [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
 			rm -rf "$$env_dir/ddl" "$$env_dir/generated" "$$env_dir/$(DATA_ACCESS_SUBDIR)"; \
@@ -95,7 +107,7 @@ _prepare-env:
 
 _bootstrap:
 	@$(MAKE) --no-print-directory _guard-root ENV="$(ENV)" ENV_ORIGIN="$(ENV_ORIGIN)"
-	@$(MAKE) --no-print-directory _prepare-env ENV="$(ENV)" ENV_ORIGIN="$(ENV_ORIGIN)"
+	@$(MAKE) --no-print-directory _prepare-env ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"
 
 _guard-workspace-target:
 	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
@@ -145,8 +157,8 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 init-env: _bootstrap ## Prepare env directories and default config files
 	@echo "Environment bootstrap ready for $(ENV)."
 
-generate: _bootstrap _guard-workspace-target ## Run generate_abac.py in the selected workspace environment (set SPACE="Name" to regenerate only one space)
-	@echo "=== Generate ABAC Config ($(ENV)$(if $(SPACE), — space: $(SPACE),)) ==="
+generate: _bootstrap _guard-workspace-target ## Run generate_abac.py in the selected workspace environment (set SPACE="Name" to regenerate only one space; set MODE=governance|genie for decentralized deployments)
+	@echo "=== Generate ABAC Config ($(ENV)$(if $(SPACE), — space: $(SPACE),)$(if $(MODE), — mode: $(MODE),)) ==="
 	@if [ -n "$(SPACE)" ]; then \
 		if [ ! -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
 			echo "ERROR: No assembled generated/abac.auto.tfvars found."; \
@@ -154,9 +166,9 @@ generate: _bootstrap _guard-workspace-target ## Run generate_abac.py in the sele
 			echo "  then use 'make generate SPACE=\"$(SPACE)\"' to add or update individual spaces."; \
 			exit 1; \
 		fi; \
-		cd "$(ENV_DIR)" && python "$(MODULE_ROOT)/generate_abac.py" $(GENERATE_ARGS) --space "$(SPACE)"; \
+		cd "$(ENV_DIR)" && python "$(MODULE_ROOT)/generate_abac.py" $(GENERATE_ARGS) $(if $(MODE),--mode $(MODE),) --space "$(SPACE)"; \
 	else \
-		cd "$(ENV_DIR)" && python "$(MODULE_ROOT)/generate_abac.py" $(GENERATE_ARGS); \
+		cd "$(ENV_DIR)" && python "$(MODULE_ROOT)/generate_abac.py" $(GENERATE_ARGS) $(if $(MODE),--mode $(MODE),); \
 	fi
 
 validate-generated: _bootstrap _guard-workspace-target ## Validate generated/ files in the selected workspace environment
@@ -207,9 +219,9 @@ print(', '.join(cats) if cats else '(none detected)') \
 		fi; \
 		python3 -c 'import hcl2, sys; cfg = hcl2.load(open("$(SOURCE_ENV_DIR)/env.auto.tfvars")); spaces = cfg.get("genie_spaces", []); tables = [t for s in spaces for t in (s.get("uc_tables") or [])]; src_cats = sorted(set(t.split(".")[0] for t in tables if t.count(".") >= 2)); pairs = {k.strip(): v.strip() for k, v in (p.split("=", 1) for p in "$(DEST_CATALOG_MAP)".split(",") if "=" in p)}; missing = [c for c in src_cats if c not in pairs]; extra = [k for k in pairs if k not in src_cats]; (print("ERROR: DEST_CATALOG_MAP is missing mappings for: " + ", ".join(missing)) or print("       Detected source catalogs in $(SOURCE_ENV)/env.auto.tfvars: " + ", ".join(src_cats)) or sys.exit(1)) if missing else None; (print("ERROR: DEST_CATALOG_MAP references unknown source catalogs: " + ", ".join(extra)) or print("       Check for typos. Detected source catalogs: " + ", ".join(src_cats)) or sys.exit(1)) if extra else None' || exit 1; \
 		echo "=== Cross-env promote: $(SOURCE_ENV) -> $(DEST_ENV) ==="; \
-		$(MAKE) --no-print-directory _prepare-env ENV="$(DEST_ENV)"; \
-		dest_env_dir="$(MODULE_ROOT)/envs/$(DEST_ENV)"; \
-		python3 -c 'import hcl2, sys; dest = sys.argv[1]; cfg = hcl2.load(open("$(SOURCE_ENV_DIR)/env.auto.tfvars")); pairs = {k.strip(): v.strip() for k, v in (p.split("=", 1) for p in "$(DEST_CATALOG_MAP)".split(",") if "=" in p)}; remap = lambda t: (lambda p: pairs.get(p[0], p[0]) + "." + p[1] if len(p) == 2 else t)(t.split(".", 1)); spaces = cfg.get("genie_spaces", []); space_lines = lambda s: ["  {", "    name             = \"" + (s.get("name") or "") + "\"", "    genie_space_id   = \"" + (s.get("genie_space_id") or "") + "\"", "    sql_warehouse_id = \"" + (s.get("sql_warehouse_id") or "") + "\"", "    uc_tables = ["] + ["      \"" + remap(t) + "\"," for t in (s.get("uc_tables") or [])] + ["    ]", "  },"]; lines = ["genie_spaces = ["] + [line for s in spaces for line in space_lines(s)] + ["]", "", "sql_warehouse_id = \"\""]; open(dest + "/env.auto.tfvars", "w").write("\n".join(lines) + "\n"); print("  Wrote " + dest + "/env.auto.tfvars"); [print("  Catalog remap: " + s + " -> " + d) for s, d in pairs.items()]' "$$dest_env_dir" || exit 1; \
+		$(MAKE) --no-print-directory _prepare-env ENV="$(DEST_ENV)" ENV_DIR="$(DEST_ENV_DIR)"; \
+		dest_env_dir="$(DEST_ENV_DIR)"; \
+		python3 -c 'import hcl2, sys; dest = sys.argv[1]; cfg = hcl2.load(open("$(SOURCE_ENV_DIR)/env.auto.tfvars")); pairs = {k.strip(): v.strip() for k, v in (p.split("=", 1) for p in "$(DEST_CATALOG_MAP)".split(",") if "=" in p)}; remap = lambda t: (lambda p: pairs.get(p[0], p[0]) + "." + p[1] if len(p) == 2 else t)(t.split(".", 1)); spaces = cfg.get("genie_spaces", []); space_lines = lambda s: ["  {", "    name             = \"" + (s.get("name") or "") + "\"", "    genie_space_id   = \"" + (s.get("genie_space_id") or "") + "\"", "    sql_warehouse_id = \"" + (s.get("sql_warehouse_id") or "") + "\"", "    uc_tables = ["] + ["      \"" + remap(t) + "\"," for t in (s.get("uc_tables") or [])] + ["    ]", "  },"]; wh_id = cfg.get("sql_warehouse_id", ""); wh_id = (wh_id[0] if isinstance(wh_id, list) else wh_id) or ""; lines = ["genie_spaces = ["] + [line for s in spaces for line in space_lines(s)] + ["]", "", "sql_warehouse_id = \"" + wh_id + "\""]; open(dest + "/env.auto.tfvars", "w").write("\n".join(lines) + "\n"); print("  Wrote " + dest + "/env.auto.tfvars"); [print("  Catalog remap: " + s + " -> " + d) for s, d in pairs.items()]' "$$dest_env_dir" || exit 1; \
 		mkdir -p "$$dest_env_dir/generated"; \
 		map_flags=$$(python3 -c 'pairs = [p.strip() for p in "$(DEST_CATALOG_MAP)".split(",") if "=" in p]; print(" ".join("--map " + p for p in pairs))'); \
 		python3 "$(MODULE_ROOT)/scripts/remap_generated_config.py" \
@@ -252,7 +264,7 @@ print(', '.join(cats) if cats else '(none detected)') \
 _plan-layer:
 	@layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
 	echo "=== Terraform Plan ($$layer:$$target_env) ==="; \
-	"$(ROOT_RUNNER)" "$$layer" "$$target_env" plan
+	LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan
 
 plan: _bootstrap ## Run terraform plan for the selected layer or workspace env
 	@set -e; if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
@@ -272,12 +284,7 @@ sync-tags: _bootstrap ## Sync tag policy values in the shared account layer
 
 _apply-layer:
 	@set -e; layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
-	case "$$layer" in \
-		account) env_dir="$(ACCOUNT_ENV_DIR)" ;; \
-		data_access) env_dir="$(MODULE_ROOT)/envs/$$target_env/$(DATA_ACCESS_SUBDIR)" ;; \
-		workspace) env_dir="$(MODULE_ROOT)/envs/$$target_env" ;; \
-		*) echo "Unknown layer $$layer"; exit 1 ;; \
-	esac; \
+	env_dir="$(LAYER_ENV_DIR)"; \
 	if [ ! -f "$$env_dir/abac.auto.tfvars" ]; then \
 		echo "=== Skipping terraform apply ($$layer:$$target_env): no $$env_dir/abac.auto.tfvars ==="; \
 		exit 0; \
@@ -296,19 +303,19 @@ _apply-layer:
 	echo "=== Terraform Apply ($$layer:$$target_env) ==="; \
 	if [ "$$layer" = "account" ]; then \
 		echo "=== Auto-importing existing account resources (idempotent apply) ==="; \
-		(cd "$$env_dir" && TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(MODULE_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
+		(cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(MODULE_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
 	fi; \
 	if [ "$$layer" = "data_access" ]; then \
 		echo "=== Auto-importing existing data_access resources (idempotent apply) ==="; \
-		(cd "$$env_dir" && TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(MODULE_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
+		(cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(MODULE_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
 	fi; \
-	"$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve; \
+	LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve; \
 	printf "%s\n" "$$current_fingerprint" > "$$fingerprint_file"
 
 apply: _bootstrap ## Apply the selected layer, or account -> data_access -> workspace for ENV=<workspace>
 	@set -e; if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		$(MAKE) --no-print-directory _guard-account-config; \
-		$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV); \
+		$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
 	else \
 		$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 		if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
@@ -318,10 +325,50 @@ apply: _bootstrap ## Apply the selected layer, or account -> data_access -> work
 		fi; \
 		$(MAKE) --no-print-directory _guard-account-config; \
 		$(MAKE) --no-print-directory TARGET_ENV="$(ENV)" _guard-data-access-config; \
-		$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV); \
-		$(MAKE) --no-print-directory _apply-layer LAYER=data_access TARGET_ENV=$(ENV); \
-		$(MAKE) --no-print-directory _apply-layer LAYER=workspace TARGET_ENV=$(ENV); \
+		$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
+		echo "=== Waiting 30s for account-level groups to propagate before data_access apply ==="; \
+		sleep 30; \
+		$(MAKE) --no-print-directory _apply-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"; \
+		echo "=== Waiting 30s for account-level groups to propagate before workspace apply ==="; \
+		sleep 30; \
+		$(MAKE) --no-print-directory _apply-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"; \
 	fi
+
+apply-governance: _bootstrap _guard-workspace-target ## [Governance team] Apply account + data_access layers only (no Genie spaces)
+	@set -e; \
+	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
+	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
+		$(MAKE) --no-print-directory ENV="$(ENV)" promote; \
+	else \
+		echo "=== Skipping promote (no $(ENV_DIR)/generated/abac.auto.tfvars) ==="; \
+	fi; \
+	$(MAKE) --no-print-directory _guard-account-config; \
+	$(MAKE) --no-print-directory TARGET_ENV="$(ENV)" _guard-data-access-config; \
+	$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
+	echo "=== Waiting 30s for account-level groups to propagate before data_access apply ==="; \
+	sleep 30; \
+	$(MAKE) --no-print-directory _apply-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"
+
+apply-genie: _bootstrap _guard-workspace-target ## [BU team] Apply workspace layer only — groups + Genie spaces (assumes governance already applied)
+	@set -e; \
+	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
+	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
+		echo "=== Extracting workspace config from genie draft ($(ENV)) ==="; \
+		python3 "$(MODULE_ROOT)/scripts/split_abac_config.py" \
+			"$(ENV_DIR)/generated/abac.auto.tfvars" \
+			"$(ACCOUNT_ENV_DIR)/abac.auto.tfvars" \
+			"$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/abac.auto.tfvars" \
+			"$(ENV_DIR)/abac.auto.tfvars"; \
+	else \
+		echo "=== Skipping split (no $(ENV_DIR)/generated/abac.auto.tfvars) ==="; \
+	fi; \
+	$(MAKE) --no-print-directory _apply-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"
+
+destroy-governance: _bootstrap _guard-workspace-target ## [Governance team] Destroy data_access layer for the selected env (leaves workspace/Genie untouched)
+	@$(MAKE) --no-print-directory _destroy-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"
+
+destroy-genie: _bootstrap _guard-workspace-target ## [BU team] Destroy workspace layer only (leaves data_access/ABAC untouched)
+	@$(MAKE) --no-print-directory _destroy-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"
 
 import: _bootstrap ## Import existing resources into the selected layer state
 	@echo "=== Import Existing Resources ($(ENV)) ==="
@@ -378,14 +425,14 @@ migrate-state: _bootstrap ## Migrate legacy state into account/data_access/works
 _destroy-layer:
 	@layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
 	echo "=== Terraform Destroy ($$layer:$$target_env) ==="; \
-	"$(ROOT_RUNNER)" "$$layer" "$$target_env" destroy -auto-approve $(DESTROY_FLAGS)
+	LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" destroy -auto-approve $(DESTROY_FLAGS)
 
 destroy: _bootstrap ## Destroy the selected layer or workspace environment
 	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
-		$(MAKE) --no-print-directory _destroy-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV); \
+		$(MAKE) --no-print-directory _destroy-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
 	else \
-		$(MAKE) --no-print-directory _destroy-layer LAYER=workspace TARGET_ENV=$(ENV); \
-		$(MAKE) --no-print-directory _destroy-layer LAYER=data_access TARGET_ENV=$(ENV); \
+		$(MAKE) --no-print-directory _destroy-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"; \
+		$(MAKE) --no-print-directory _destroy-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"; \
 	fi
 
 clean: ## Remove generated files and Terraform state for the selected environment
@@ -409,6 +456,16 @@ _ITEST_RUNNER   := python3 "$(MODULE_ROOT)/scripts/run_integration_tests.py"
 _ITEST_AUTH     := $(ENV_DIR)/auth.auto.tfvars
 _ITEST_WH_FLAG  := $(if $(WAREHOUSE_ID),--warehouse-id $(WAREHOUSE_ID),)
 _ITEST_KD_FLAG  := $(if $(KEEP_DATA),--keep-data,)
+# FAIL_FAST: set to non-empty to stop at first scenario failure (default for test-ci).
+# Override with FAIL_FAST=0 to see all scenario results even on failure.
+_ITEST_FF_FLAG  := $(if $(filter 0,$(FAIL_FAST)),,--fail-fast)
+# Path to account-admin credentials file used by test-ci for automated provisioning.
+# Override with: make test-ci ACCOUNT_ADMIN_ENV=/path/to/credentials.env
+ACCOUNT_ADMIN_ENV ?= $(MODULE_ROOT)/scripts/account-admin.env
+_PROVISION       := python3 "$(MODULE_ROOT)/scripts/provision_test_env.py"
+
+test-unit: ## Run fast unit tests (no Databricks/LLM/Terraform required) — use before integration tests
+	cd "$(MODULE_ROOT)" && python3 -m pytest tests/ -v --tb=short
 
 test-quickstart: _bootstrap _guard-workspace-target ## Scenario: single space, single catalog (quickstart flow)
 	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
@@ -452,11 +509,81 @@ test-attach-promote: _bootstrap _guard-workspace-target ## Scenario: attach to U
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
-test-all: _bootstrap _guard-workspace-target ## Run all scenario tests sequentially
+test-decentralized: _bootstrap _guard-workspace-target ## Scenario: central governance team applies ABAC, separate BU team applies Genie space
+	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario decentralized \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-all: _bootstrap _guard-workspace-target ## Run all scenario tests sequentially (continues on failure — use test-ci for fail-fast CI runs)
 	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario all \
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-ci: ## Full CI pipeline: unit tests → provision fresh env → integration tests → teardown (always)
+	@# Designed for automated DevOps workflows (PR checks, nightly runs).
+	@# Provisions a fresh isolated Databricks environment, runs all tests, then tears
+	@# it down — even if tests fail — so no cloud resources are left behind.
+	@# Runs with --fail-fast: stops at the first failing scenario so the pipeline
+	@# exits quickly on a broken codebase (saves cloud time and cost).
+	@#
+	@# Options:
+	@#   ACCOUNT_ADMIN_ENV=<path>   credentials file (default: scripts/account-admin.env)
+	@#   WAREHOUSE_ID=<id>          pin a specific SQL warehouse (optional)
+	@#   SCENARIO=<name>            run only one scenario instead of all (optional)
+	@#   FAIL_FAST=0                disable fail-fast to see all scenario results
+	@#
+	@# Example (GitHub Actions):
+	@#   - run: make test-ci ACCOUNT_ADMIN_ENV=$${{ secrets.ADMIN_ENV_FILE }}
+	@set -e; \
+	echo ""; \
+	echo "╔══════════════════════════════════════════════════════════════╗"; \
+	echo "║              CI Pipeline: provision → test → teardown        ║"; \
+	echo "╚══════════════════════════════════════════════════════════════╝"; \
+	echo "  Credentials: $(ACCOUNT_ADMIN_ENV)"; \
+	echo ""; \
+	echo "── Phase 1: Unit Tests (fast, no infrastructure required)"; \
+	cd "$(MODULE_ROOT)" && python3 -m pytest tests/ -v --tb=short || { \
+		echo ""; \
+		echo "  Unit tests FAILED — aborting CI pipeline (no cloud resources provisioned)."; \
+		exit 1; \
+	}; \
+	echo ""; \
+	echo "── Phase 2: Provision fresh integration-test environment"; \
+	$(_PROVISION) provision --force --env-file "$(ACCOUNT_ADMIN_ENV)"; \
+	PROVISION_EXIT=$$?; \
+	if [ "$$PROVISION_EXIT" -ne 0 ]; then \
+		echo ""; \
+		echo "  ERROR: Provisioning failed (exit $$PROVISION_EXIT)."; \
+		exit $$PROVISION_EXIT; \
+	fi; \
+	echo ""; \
+	echo "── Phase 3: Integration Tests"; \
+	ITEST_SCENARIO="$(if $(SCENARIO),$(SCENARIO),all)"; \
+	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario "$$ITEST_SCENARIO" \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG) $(_ITEST_FF_FLAG); \
+	TEST_EXIT=$$?; \
+	echo ""; \
+	echo "── Phase 4: Teardown (always runs)"; \
+	$(_PROVISION) teardown --env-file "$(ACCOUNT_ADMIN_ENV)"; \
+	TEARDOWN_EXIT=$$?; \
+	echo ""; \
+	if [ "$$TEST_EXIT" -ne 0 ]; then \
+		echo "╔══════════════════════════════════════════════════════════════╗"; \
+		echo "║              CI Pipeline FAILED (integration tests)          ║"; \
+		echo "╚══════════════════════════════════════════════════════════════╝"; \
+		exit $$TEST_EXIT; \
+	fi; \
+	if [ "$$TEARDOWN_EXIT" -ne 0 ]; then \
+		echo "  WARNING: Teardown completed with errors (exit $$TEARDOWN_EXIT)."; \
+		echo "  Check cloud resources manually."; \
+	fi; \
+	echo "╔══════════════════════════════════════════════════════════════╗"; \
+	echo "║              CI Pipeline PASSED                              ║"; \
+	echo "╚══════════════════════════════════════════════════════════════╝"
 
 integration-test: ## Run the full end-to-end integration test (setup → generate → apply → verify → promote → apply prod → verify prod → teardown)
 	@# Options:

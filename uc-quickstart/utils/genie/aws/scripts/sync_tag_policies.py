@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
-"""Sync tag policy values from abac.auto.tfvars to Databricks via SDK.
+"""Sync tag policy values from abac.auto.tfvars to Databricks via REST API.
 
 The Databricks Terraform provider has a bug where it reorders tag policy
 values after apply, causing "Provider produced inconsistent result" errors.
 This script bypasses Terraform by updating tag policy values directly via
-the Databricks SDK, so Terraform can use ignore_changes = [values] safely.
+the Databricks REST API, so Terraform can use ignore_changes = [values] safely.
 
 Usage:
     python3 scripts/sync_tag_policies.py [path/to/abac.auto.tfvars]
 """
+import json
 import os
+import ssl
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 WORK_DIR = Path.cwd()
 
 
 def _load_auth():
-    """Read auth.auto.tfvars and set SDK env vars."""
+    """Read auth.auto.tfvars and return config dict + set SDK env vars."""
     auth_path = WORK_DIR / "auth.auto.tfvars"
     if not auth_path.exists():
-        return
+        return {}
     try:
         import hcl2
     except ImportError:
@@ -40,8 +45,17 @@ def _load_auth():
     }
     for tfvar_key, env_key in mapping.items():
         val = cfg.get(tfvar_key, "")
+        if isinstance(val, list):
+            val = val[0] if val else ""
+        val = (val or "").strip()
         if val and not os.environ.get(env_key):
             os.environ[env_key] = val
+
+    return cfg
+
+
+def _str(v):
+    return (v[0] if isinstance(v, list) else v or "").strip()
 
 
 def main():
@@ -62,15 +76,48 @@ def main():
         print("  [SKIP] No tag_policies found in config")
         return
 
-    _load_auth()
+    auth_cfg = _load_auth()
 
+    # Get auth token via SDK's config.authenticate()
     from databricks.sdk import WorkspaceClient
-    from databricks.sdk.service.tags import TagPolicy, Value
-    w = WorkspaceClient(product="genierails", product_version="0.1.0")
+    host = _str(auth_cfg.get("databricks_workspace_host", ""))
+    client_id = _str(auth_cfg.get("databricks_client_id", ""))
+    client_secret = _str(auth_cfg.get("databricks_client_secret", ""))
 
+    w = WorkspaceClient(
+        host=host or None,
+        client_id=client_id or None,
+        client_secret=client_secret or None,
+        product="genierails",
+        product_version="0.1.0",
+    )
+    token = w.config.authenticate()  # {'Authorization': 'Bearer ...'}
+    base = (host or os.environ.get("DATABRICKS_HOST", "")).rstrip("/")
+    if not base:
+        print("  [WARN] No workspace host found; skipping tag policy sync")
+        return
+
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    # List existing tag policies via REST API
     existing = {}
-    for tp in w.tag_policies.list_tag_policies():
-        existing[tp.tag_key] = set(v.name for v in (tp.values or []))
+    try:
+        list_url = f"{base}/api/2.1/unity-catalog/tag-policies"
+        req = urllib.request.Request(list_url, headers=token)
+        with urllib.request.urlopen(req, timeout=30, context=ssl_ctx) as resp:
+            data = json.loads(resp.read())
+        for tp in data.get("tag_policies", []):
+            tag_key = tp.get("tag_key", "")
+            values = set(v.get("name", "") for v in (tp.get("values") or []))
+            existing[tag_key] = values
+    except Exception as list_err:
+        # The tag-policies API may return a transient InternalError.
+        # If listing fails we cannot determine which policies need syncing,
+        # so skip — terraform apply will still create/update missing ones.
+        print(f"  [WARN] Could not list tag policies ({list_err}); skipping")
+        return
 
     updated = 0
     for tp in desired_policies:
@@ -87,16 +134,25 @@ def main():
         missing = desired_values - current_values
         removed = current_values - desired_values
         all_values = sorted(desired_values)
-        policy = TagPolicy(
-            tag_key=key,
-            values=[Value(name=v) for v in all_values],
-        )
+
+        # Update tag policy via REST API
+        body = json.dumps({
+            "tag_policy": {
+                "tag_key": key,
+                "values": [{"name": v} for v in all_values],
+            },
+            "update_mask": "values",
+        }).encode()
+
         try:
-            w.tag_policies.update_tag_policy(
-                tag_key=key,
-                tag_policy=policy,
-                update_mask="values",
+            update_url = f"{base}/api/2.1/unity-catalog/tag-policies/{urllib.parse.quote(key, safe='')}"
+            req = urllib.request.Request(
+                update_url,
+                data=body,
+                headers={**token, "Content-Type": "application/json"},
+                method="PATCH",
             )
+            urllib.request.urlopen(req, timeout=30, context=ssl_ctx)
             changes = []
             if missing:
                 changes.append(f"added {sorted(missing)}")

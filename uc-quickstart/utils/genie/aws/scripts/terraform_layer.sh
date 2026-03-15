@@ -19,11 +19,13 @@ ENVS_DIR="$PROJECT_ROOT/envs"
 case "$LAYER" in
   account)
     ROOT_DIR="$ROOTS_DIR/account"
-    ENV_DIR="$ENVS_DIR/account"
+    ENV_DIR="${LAYER_ENV_DIR:-$ENVS_DIR/account}"
     ;;
   data_access)
     ROOT_DIR="$ROOTS_DIR/data_access"
-    if [ "$ENV_NAME" = "data_access" ] && [ -d "$ENVS_DIR/data_access" ]; then
+    if [ -n "${LAYER_ENV_DIR:-}" ]; then
+      ENV_DIR="$LAYER_ENV_DIR"
+    elif [ "$ENV_NAME" = "data_access" ] && [ -d "$ENVS_DIR/data_access" ]; then
       ENV_DIR="$ENVS_DIR/data_access"
     else
       ENV_DIR="$ENVS_DIR/$ENV_NAME/data_access"
@@ -31,7 +33,7 @@ case "$LAYER" in
     ;;
   workspace)
     ROOT_DIR="$ROOTS_DIR/workspace"
-    ENV_DIR="$ENVS_DIR/$ENV_NAME"
+    ENV_DIR="${LAYER_ENV_DIR:-$ENVS_DIR/$ENV_NAME}"
     ;;
   *)
     echo "Unknown layer: $LAYER" >&2

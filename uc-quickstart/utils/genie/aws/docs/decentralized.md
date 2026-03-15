@@ -1,0 +1,174 @@
+# Decentralized Governance
+
+This document covers the decentralized operating model, where a central **Data Governance team** owns ABAC policies and groups, while independent **BU teams** create and manage their own Genie spaces.
+
+For the quick step-by-step, see [playbook.md §7](playbook.md#7-decentralized-governance). This document covers the reasoning, Git strategies, CI/CD integration, and FAQ.
+
+---
+
+## When to use this pattern
+
+| Situation | Recommended mode |
+| --------- | ---------------- |
+| Single team controls data access and Genie spaces end-to-end | `make generate` + `make apply` (default, no change) |
+| Central governance team + BU teams creating Genie spaces | `MODE=governance` / `apply-governance` + `MODE=genie` / `apply-genie` |
+| Two independent BU teams, each owning ABAC for their own catalogs | `make generate` per-BU + `abac_managed_catalogs` (see [advanced.md](advanced.md)) |
+
+Use the decentralized pattern when:
+
+- Your organization has a dedicated Data Governance or Data Platform team that standardizes access policies across the company.
+- Business units want self-service Genie space creation without needing governance expertise.
+- You want to prevent BU teams from accidentally modifying ABAC policies, tag assignments, or masking functions.
+- Different teams have different deployment cadences (governance policies change rarely; Genie spaces evolve quickly).
+
+---
+
+## Architecture
+
+The three Terraform layers are already independent states. The decentralized mode exposes them as separate operational roles:
+
+```
+Account layer      →  Groups + Tag Policies
+                        owned by: Governance team
+                        applied by: make apply-governance (or make apply ENV=account)
+
+Data Access layer  →  Tag Assignments + FGAC Policies + Masking Functions + Catalog Grants
+                        owned by: Governance team
+                        applied by: make apply-governance ENV=<env>
+
+Workspace layer    →  Workspace Assignment + Entitlements + Genie Spaces + ACLs
+                        owned by: BU team
+                        applied by: make apply-genie ENV=<bu-env>
+```
+
+The workspace module (`modules/workspace/main.tf`) looks up groups by name — it never creates them. This means BU teams can reference groups created by the governance team without any additional coordination.
+
+Catalog grants (`USE_CATALOG`, `USE_SCHEMA`, `SELECT`) are applied by the governance team's data_access layer. Once in place, BU teams' Genie spaces can query those catalogs immediately.
+
+---
+
+## Roles and responsibilities
+
+### Central Data Governance team
+
+Owns and runs:
+
+- `envs/account/` — account groups, tag policy definitions
+- `envs/<env>/data_access/` — tag assignments, FGAC policies, masking functions, catalog grants
+
+What they commit to Git:
+- `envs/account/abac.auto.tfvars` — groups and tag policies
+- `envs/<env>/data_access/abac.auto.tfvars` — tag assignments and FGAC policies
+- `envs/<env>/data_access/masking_functions.sql`
+
+Commands they run:
+```bash
+make generate ENV=<env> MODE=governance   # LLM generates ABAC config only
+make apply-governance ENV=<env>           # applies account + data_access
+make destroy-governance ENV=<env>         # tears down data_access only
+```
+
+### BU teams (one per business unit)
+
+Own and run their workspace env only:
+
+- `envs/<bu-env>/env.auto.tfvars` — Genie space definitions (tables, warehouse)
+- `envs/<bu-env>/abac.auto.tfvars` — genie_space_configs (instructions, benchmarks, etc.)
+
+What they commit to Git:
+- `envs/<bu-env>/env.auto.tfvars`
+- `envs/<bu-env>/abac.auto.tfvars` (after promote)
+- `envs/<bu-env>/auth.auto.tfvars` (gitignored — contains credentials)
+
+Commands they run:
+```bash
+make generate ENV=<bu-env> MODE=genie   # LLM generates genie_space_configs only
+make apply-genie ENV=<bu-env>           # applies workspace layer only
+make destroy-genie ENV=<bu-env>         # tears down workspace layer only
+```
+
+---
+
+## Git repository strategies
+
+### Mono-repo (recommended for simplicity)
+
+All environments live under `envs/` in a single repository. Use directory-level CODEOWNERS to enforce ownership:
+
+```
+# .github/CODEOWNERS
+envs/account/           @data-governance-team
+envs/*/data_access/     @data-governance-team
+envs/bu_finance/        @bu-finance-team
+envs/bu_clinical/       @bu-clinical-team
+```
+
+### Split repos (advanced)
+
+Governance team maintains a separate repo containing `envs/account/` and `envs/*/data_access/`. BU teams maintain their own repos containing only their workspace envs. Use a shared `auth.auto.tfvars` symlink or CI secret injection to avoid credential duplication.
+
+---
+
+## CI/CD integration
+
+See [cicd.md](cicd.md) for general CI/CD setup. For decentralized mode:
+
+**Governance pipeline** (triggered by changes to `envs/account/` or `envs/*/data_access/`):
+```yaml
+- run: make apply-governance ENV=prod
+```
+
+**BU pipeline** (triggered by changes to `envs/bu_finance/`):
+```yaml
+- run: make apply-genie ENV=bu_finance
+```
+
+Each pipeline only touches its own Terraform state files. The governance pipeline never writes to `envs/bu_*/terraform.tfstate`. The BU pipeline never writes to `envs/*/data_access/terraform.tfstate`.
+
+---
+
+## Promotion in decentralized mode
+
+BU teams can promote their Genie spaces from dev to prod using a modified flow:
+
+```bash
+# Promote genie_space_configs from bu_finance_dev to bu_finance_prod:
+make promote SOURCE_ENV=bu_finance_dev DEST_ENV=bu_finance_prod \
+  DEST_CATALOG_MAP="dev_catalog=prod_catalog"
+
+# Apply only the workspace layer in prod:
+make apply-genie ENV=bu_finance_prod
+```
+
+Governance runs separately for the prod environment — the promotion only carries `genie_space_configs`, not ABAC.
+
+---
+
+## FAQ
+
+**What if a BU needs a new group?**
+
+New groups must be requested from the governance team. The governance team adds the group to `envs/account/abac.auto.tfvars`, runs `make apply-governance`, and the group becomes available for BU teams to reference in their Genie space ACLs. BU teams can then add the group name to their `env.auto.tfvars` (genie_spaces ACLs) and `make apply-genie`.
+
+**Can a BU team see what groups are available?**
+
+Yes — the group names are in `envs/account/abac.auto.tfvars`. In `genie` mode, `make generate` auto-loads those names and includes them in the prompt so the LLM suggests the right group references.
+
+**Can a BU team run `make apply` (full) instead of `make apply-genie`?**
+
+Yes — `make apply` applies all three layers. In decentralized mode this is safe if the BU env's `data_access/abac.auto.tfvars` only contains what the BU owns (e.g., just group lookups, no tag_assignments). However, `make apply-genie` is the recommended guard — it makes the role boundary explicit and prevents accidental ABAC changes.
+
+**What if we want to move from centralized to decentralized?**
+
+1. Identify which tables/catalogs the governance team will own.
+2. The governance team adopts the existing `data_access` Terraform state — no state migration needed.
+3. BU teams' workspace states are already separate — they switch to `make apply-genie`.
+4. Remove any ABAC config from BU teams' `envs/<bu-env>/abac.auto.tfvars` (it should only contain `genie_space_configs` and `groups` lookup).
+
+**What if the BU team references a table that's not governed?**
+
+`make apply-genie` will succeed (the workspace layer doesn't check catalog grants), but Genie queries against ungoverned tables will fail at query time due to missing `SELECT` grants. The governance team must add the tables to their governed set and re-run `make apply-governance`.
+
+**Can two BUs share the same Genie space?**
+
+No — a Genie space is workspace-specific. If two BUs need the same data surface, each creates their own Genie space pointing at the same governed tables. The ABAC governance applies identically to both since it's catalog-level.

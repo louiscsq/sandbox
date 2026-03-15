@@ -543,6 +543,29 @@ PYEOF
         rm -f "$tmpfile"
         return 0
       fi
+      # If the no-title retry also fails with invalid join_specs, try once more
+      # without both title and join_specs.
+      if [[ -n "${GENIE_JOIN_SPECS:-}" && "${GENIE_JOIN_SPECS}" != "[]" ]]; then
+        if echo "$response_body" | grep -q 'Failed to parse export proto'; then
+          echo "Join specs were also rejected (no-title retry). Retrying without title and join_specs..."
+          patch_body=$(build_patch_body 1 1)
+          echo "$patch_body" > "$tmpfile"
+          response=$(curl -s -w "\n%{http_code}" -X PATCH \
+            -H "${UA_HEADER}" \
+            -H "Authorization: Bearer ${token}" \
+            -H "Content-Type: application/json" \
+            -d @"${tmpfile}" \
+            "${workspace_url}/api/2.0/genie/spaces/${space_id}")
+          http_code=$(echo "$response" | tail -n1)
+          response_body=$(echo "$response" | sed '$d')
+          if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
+            echo "Genie Space ${space_id} config updated successfully (title already set, join_specs skipped)."
+            echo "WARNING: join_specs were skipped because the Genie API rejected them."
+            rm -f "$tmpfile"
+            return 0
+          fi
+        fi
+      fi
     fi
   fi
 

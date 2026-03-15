@@ -12,13 +12,16 @@ Where:
 The script patches (not replaces) the assembled outputs:
   - generated/abac.auto.tfvars:
       * genie_space_configs: replaces/adds the entry for <space_key>
+      * tag_policies: adds new keys from the per-space config (dedup by key;
+        existing keys have their values union-merged so the account layer can
+        create any tag_key introduced by the new space)
       * tag_assignments: appends new entries (dedup by entity_name + tag_key)
       * fgac_policies: appends new entries (dedup by policy name)
   - generated/masking_functions.sql:
       * appends new CREATE FUNCTION blocks (dedup by function name)
 
-Groups, tag_policies, and group_members are NEVER touched — they are shared
-governance state established by full generation.
+Groups and group_members are NEVER touched — they are shared governance state
+established by full generation.
 """
 
 from __future__ import annotations
@@ -280,6 +283,7 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     new_genie_cfgs: dict = space_cfg.get("genie_space_configs") or {}
     new_tag_assignments: list = space_cfg.get("tag_assignments") or []
     new_fgac_policies: list = space_cfg.get("fgac_policies") or []
+    new_tag_policies: list = space_cfg.get("tag_policies") or []
 
     # ── Load assembled content ────────────────────────────────────────────
     assembled_cfg = load_hcl_safe(assembled_abac)
@@ -288,6 +292,35 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     existing_genie_cfgs: dict = assembled_cfg.get("genie_space_configs") or {}
     existing_tag_assignments: list = assembled_cfg.get("tag_assignments") or []
     existing_fgac_policies: list = assembled_cfg.get("fgac_policies") or []
+    existing_tag_policies: list = assembled_cfg.get("tag_policies") or []
+
+    # ── Merge tag_policies (dedup by key — add any new keys from per-space) ─
+    # Per-space generation may introduce tag_keys not present in the assembled
+    # config (e.g. phi_level for a Clinical space).  Those keys must be added
+    # to the assembled tag_policies so that validation passes and the account
+    # layer creates the corresponding Databricks tag policies.
+    existing_tp_keys = {tp.get("key", "") for tp in existing_tag_policies}
+    added_tp = 0
+    merged_tag_policies = list(existing_tag_policies)
+    for tp in new_tag_policies:
+        key = tp.get("key", "")
+        if key and key not in existing_tp_keys:
+            merged_tag_policies.append(tp)
+            existing_tp_keys.add(key)
+            added_tp += 1
+        elif key in existing_tp_keys:
+            # Merge values for existing keys (union of values)
+            for i, etp in enumerate(merged_tag_policies):
+                if etp.get("key") == key:
+                    existing_vals = set(etp.get("values") or [])
+                    new_vals = set(tp.get("values") or [])
+                    combined = sorted(existing_vals | new_vals)
+                    if combined != sorted(existing_vals):
+                        merged_tag_policies[i] = dict(etp, values=combined)
+                        added_tp += 1
+                    break
+    if added_tp:
+        print(f"    tag_policies:     added/updated {added_tp} key(s) from per-space config")
 
     # ── Merge genie_space_configs ─────────────────────────────────────────
     merged_genie = dict(existing_genie_cfgs)
@@ -325,8 +358,15 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
         print(f"    fgac_policies:    added {added_pol} new entry/entries")
 
     # ── Rewrite assembled abac.auto.tfvars ────────────────────────────────
-    # Remove the three sections we are replacing, then append the new ones.
+    # Remove the sections we are replacing, then append the new ones.
     updated = assembled_text
+
+    # Replace tag_policies block (if we added/updated any keys)
+    if added_tp:
+        updated = remove_hcl_top_level_list(updated, "tag_policies")
+        if merged_tag_policies:
+            tp_hcl = "tag_policies = " + _render_value(merged_tag_policies)
+            updated = updated.rstrip() + "\n\n" + tp_hcl + "\n"
 
     # Replace genie_space_configs block
     updated = remove_hcl_top_level_block(updated, "genie_space_configs")

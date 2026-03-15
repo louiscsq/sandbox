@@ -77,13 +77,25 @@ run_import() {
 
   if $DRY_RUN; then
     echo "  [DRY RUN] $TF_RUNNER '$LAYER' '$ENV_NAME' import '$address' '$id'"
+    return 0
+  fi
+
+  # Skip silently if the resource is already tracked in Terraform state.
+  # This avoids the noisy "Resource already managed by Terraform" error block
+  # that appears on retries when a previous attempt already imported the resource.
+  # Note: we list ALL state resources and grep for an exact match because passing
+  # the address directly to `terraform state list` treats brackets as glob patterns
+  # and can fail to match addresses like groups["Junior_Analyst"].
+  if "$TF_RUNNER" "$LAYER" "$ENV_NAME" state list 2>/dev/null | grep -qF "$address"; then
+    echo "  ↩ Already in state: $address (skipping)"
+    return 0
+  fi
+
+  echo "  Importing: $address -> $id"
+  if "$TF_RUNNER" "$LAYER" "$ENV_NAME" import "$address" "$id" 2>&1; then
+    echo "  ✓ Imported $address"
   else
-    echo "  Importing: $address -> $id"
-    if "$TF_RUNNER" "$LAYER" "$ENV_NAME" import "$address" "$id" 2>&1; then
-      echo "  ✓ Imported $address"
-    else
-      echo "  ✗ Failed to import $address (may not exist or already in state)"
-    fi
+    echo "  ✗ Failed to import $address (may not exist in Databricks)"
   fi
 }
 
@@ -175,36 +187,67 @@ for fname in ['auth.auto.tfvars', '../auth.auto.tfvars']:
             auth = hcl2.load(f)
         break
 
-account_id    = _str(auth.get('databricks_account_id',    ''))
 client_id     = _str(auth.get('databricks_client_id',     ''))
 client_secret = _str(auth.get('databricks_client_secret', ''))
+workspace_host = _str(auth.get('databricks_workspace_host', ''))
 
-use_existence_check = False
+# Only emit keys that ACTUALLY EXIST in Databricks.
+# If a desired key doesn't exist yet, terraform apply will CREATE it — no
+# import needed.  Emitting non-existent keys causes noisy
+# "Cannot import non-existent remote object" errors that look alarming
+# even though run_import() handles them.  Querying first gives a clean
+# import step with no false errors.
 existing = set()
-
 try:
-    from databricks.sdk import AccountClient
-    a = AccountClient(
-        host='https://accounts.cloud.databricks.com',
-        account_id=account_id,
+    from databricks.sdk import WorkspaceClient
+    w = WorkspaceClient(
+        host=workspace_host,
         client_id=client_id,
         client_secret=client_secret,
     )
-    for tp in a.tag_policies.list():
-        key = getattr(tp, 'tag_key', None)
-        if key and key in desired:
-            existing.add(key)
-    use_existence_check = True
+    # SDK method name varies by version; try both
+    for list_fn_name in ('list_tag_policies', 'list'):
+        try:
+            list_fn = getattr(w.tag_policies, list_fn_name)
+            for tp in list_fn():
+                key = getattr(tp, 'tag_key', None)
+                if key and key in desired:
+                    existing.add(key)
+            break
+        except Exception:
+            continue
+    else:
+        # Fall back to REST API
+        import ssl, urllib.request, json as _json
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        token = w.config.authenticate()
+        base  = workspace_host.rstrip('/')
+        try:
+            req = urllib.request.Request(f'{base}/api/2.1/unity-catalog/tag-policies', headers=token)
+            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                data = _json.loads(resp.read())
+            for tp in data.get('tag_policies', []):
+                key = tp.get('tag_key', '')
+                if key and key in desired:
+                    existing.add(key)
+        except Exception as rest_err:
+            sys.stderr.write(f'WARNING: tag policy list failed via SDK and REST ({rest_err}); skipping import\n')
+            sys.exit(0)
 except Exception as e:
-    sys.stderr.write(f'WARNING: tag_policies.list() failed ({e}), falling back\n')
+    sys.stderr.write(f'WARNING: could not list tag policies ({e}); skipping import\n')
+    sys.exit(0)
 
-if use_existence_check:
-    for k in sorted(existing):
-        print(k)
-else:
-    # Fall back: output all desired keys; import will fail gracefully if missing
-    for k in sorted(desired):
-        print(k)
+missing = desired - existing
+if missing:
+    sys.stderr.write(f'INFO: tag policies not in Databricks yet (will be created by apply): {sorted(missing)}\n')
+if existing:
+    sys.stderr.write(f'INFO: importing existing tag policies: {sorted(existing)}\n')
+
+# Only emit keys that exist — terraform apply handles the rest
+for k in sorted(existing):
+    print(k)
 TKEOF
 }
 
@@ -617,26 +660,25 @@ try:
     ssl_ctx.verify_mode = _ssl.CERT_NONE
     for catalog in set(d[1] for d in desired):
         try:
-            qs  = urllib.parse.urlencode({'on_securable_type': 'CATALOG',
-                                          'on_securable_fullname': catalog})
-            url = f'{base}/api/2.1/unity-catalog/policy-infos?{qs}'
+            # Correct API: GET /api/2.1/unity-catalog/policies/CATALOG/{catalog}
+            url = f'{base}/api/2.1/unity-catalog/policies/CATALOG/{urllib.parse.quote(catalog, safe="")}'
             req = urllib.request.Request(url, headers=token)
             with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
                 data = _json.loads(resp.read())
             existing_by_catalog[catalog] = {
-                p.get('name', '') for p in data.get('policy_infos', []) if p.get('name')
+                p.get('name', '') for p in data.get('policies', []) if p.get('name')
             }
         except urllib.error.HTTPError as he:
             if he.code in (403, 404):
                 existing_by_catalog[catalog] = set()  # no policies
             else:
-                sys.stderr.write(f'WARNING: policy_infos HTTP {he.code} for {catalog}\n')
+                sys.stderr.write(f'WARNING: policy list HTTP {he.code} for {catalog}\n')
                 existing_by_catalog[catalog] = None
         except Exception as e:
-            sys.stderr.write(f'WARNING: policy_infos list failed for {catalog}: {e}\n')
+            sys.stderr.write(f'WARNING: policy list failed for {catalog}: {e}\n')
             existing_by_catalog[catalog] = None  # unknown — fall back
 except Exception as e:
-    sys.stderr.write(f'WARNING: policy_infos check failed ({e}), falling back\n')
+    sys.stderr.write(f'WARNING: policy check failed ({e}), falling back\n')
 
 for (name, catalog, sec_type, full_name) in desired:
     known = existing_by_catalog.get(catalog)

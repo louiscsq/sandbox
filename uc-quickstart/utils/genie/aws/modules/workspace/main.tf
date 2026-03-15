@@ -90,7 +90,7 @@ resource "databricks_sql_endpoint" "warehouse" {
 # ── Existing spaces: apply ACLs + config (when config is defined) ─────────────
 
 resource "null_resource" "genie_space_acls" {
-  for_each = local.existing_spaces
+  for_each = local.genie_groups_csv != "" ? local.existing_spaces : {}
 
   triggers = {
     space_id = each.value.genie_space_id
@@ -137,6 +137,7 @@ resource "null_resource" "genie_space_config_existing" {
       DATABRICKS_CLIENT_ID     = var.databricks_client_id
       DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
       GENIE_SPACE_OBJECT_ID    = each.value.genie_space_id
+      GENIE_TABLES_CSV         = join(",", each.value.uc_tables)
       GENIE_TITLE              = each.value.config.title != "" ? each.value.config.title : each.value.name
       GENIE_DESCRIPTION        = each.value.config.description
       GENIE_SAMPLE_QUESTIONS   = jsonencode(each.value.config.sample_questions)
@@ -251,7 +252,9 @@ resource "null_resource" "genie_space_config" {
 # ── New spaces: apply ACLs ────────────────────────────────────────────────────
 
 resource "null_resource" "genie_space_acls_created" {
-  for_each = local.new_spaces
+  # Skip ACL setup when no groups are configured (e.g. decentralized genie-only mode
+  # where groups are managed by the governance team in a separate environment).
+  for_each = local.genie_groups_csv != "" ? local.new_spaces : {}
 
   triggers = {
     groups = local.genie_groups_csv

@@ -42,7 +42,7 @@ genie_spaces = [
 ]
 ```
 
-All table names must be fully qualified (`catalog.schema.table` or `catalog.schema.*`). The `name` becomes the Genie Space title in the UI. A serverless SQL warehouse is created automatically — see [Flows](docs/flows.md) for warehouse and multi-space options.
+All table names must be fully qualified (`catalog.schema.table` or `catalog.schema.*`). The `name` becomes the Genie Space title in the UI. A serverless SQL warehouse is created automatically — see [Playbook](docs/playbook.md) for warehouse and multi-space options.
 
 ### What `make apply` does
 
@@ -67,13 +67,24 @@ make setup ENV=bu2 && vi envs/bu2/auth.auto.tfvars && vi envs/bu2/env.auto.tfvar
 make generate ENV=bu2 && make apply ENV=bu2
 ```
 
+## Testing
+
+```bash
+make test-unit   # unit tests — ~1 second, no credentials required
+make test-ci     # full CI pipeline: provision → integration tests → teardown
+```
+
+See [Integration Testing](docs/integration-testing.md) for setup, credentials, scenarios, and troubleshooting.
+
 ## Documentation
 
-- [Flows](docs/flows.md) — all workflows: quickstart, multi-space, multi-catalog, existing spaces, promotion, destroy
+- [Playbook](docs/playbook.md) — all use cases: quickstart, ABAC-only, multi-space, existing spaces, promotion, decentralized governance, destroy
 - [Architecture](docs/architecture.md) — layers, artifact ownership, config files, Genie Space lifecycle
+- [Decentralized Governance](docs/decentralized.md) — central ABAC team + independent BU Genie teams
 - [CI/CD Integration](docs/cicd.md) — validate and deploy from a pipeline
 - [Troubleshooting](docs/troubleshooting.md) — imports, provider quirks, brownfield workflows
 - [Advanced Usage](docs/advanced.md) — IDP-synced groups, ABAC-only mode, masking UDF reuse, legacy migration
+- [Integration Testing](docs/integration-testing.md) — unit tests, integration scenarios, test data
 
 ## Roadmap
 

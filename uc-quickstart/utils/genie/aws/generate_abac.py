@@ -328,10 +328,12 @@ def format_genie_space_configs_hcl(configs: dict[str, dict]) -> str:
         if cfg.get("benchmarks"):
             lines.append("    benchmarks = [")
             for bm in cfg["benchmarks"]:
-                lines.append("      {")
-                lines.append(f"        question = {_hcl_str(bm['question'])}")
-                lines.append(f"        sql      = {_hcl_str(bm['sql'])}")
-                lines.append("      },")
+                if isinstance(bm, dict) and "question" in bm and "sql" in bm:
+                    lines.append("      {")
+                    lines.append(f"        question = {_hcl_str(bm['question'])}")
+                    lines.append(f"        sql      = {_hcl_str(bm['sql'])}")
+                    lines.append("      },")
+                # Skip malformed benchmarks (e.g. plain strings from LLM)
             lines.append("    ]")
 
         if cfg.get("sql_filters"):
@@ -340,6 +342,8 @@ def format_genie_space_configs_hcl(configs: dict[str, dict]) -> str:
                 lines.append("      {")
                 lines.append(f"        sql          = {_hcl_str(f['sql'])}")
                 lines.append(f"        display_name = {_hcl_str(f.get('display_name', ''))}")
+                lines.append(f"        comment      = {_hcl_str(f.get('comment', ''))}")
+                lines.append(f"        instruction  = {_hcl_str(f.get('instruction', ''))}")
                 lines.append("      },")
             lines.append("    ]")
 
@@ -347,8 +351,11 @@ def format_genie_space_configs_hcl(configs: dict[str, dict]) -> str:
             lines.append("    sql_expressions = [")
             for e in cfg["sql_expressions"]:
                 lines.append("      {")
-                lines.append(f"        alias = {_hcl_str(e['alias'])}")
-                lines.append(f"        sql   = {_hcl_str(e['sql'])}")
+                lines.append(f"        alias        = {_hcl_str(e['alias'])}")
+                lines.append(f"        sql          = {_hcl_str(e['sql'])}")
+                lines.append(f"        display_name = {_hcl_str(e.get('display_name', ''))}")
+                lines.append(f"        comment      = {_hcl_str(e.get('comment', ''))}")
+                lines.append(f"        instruction  = {_hcl_str(e.get('instruction', ''))}")
                 lines.append("      },")
             lines.append("    ]")
 
@@ -356,8 +363,11 @@ def format_genie_space_configs_hcl(configs: dict[str, dict]) -> str:
             lines.append("    sql_measures = [")
             for m in cfg["sql_measures"]:
                 lines.append("      {")
-                lines.append(f"        alias = {_hcl_str(m['alias'])}")
-                lines.append(f"        sql   = {_hcl_str(m['sql'])}")
+                lines.append(f"        alias        = {_hcl_str(m['alias'])}")
+                lines.append(f"        sql          = {_hcl_str(m['sql'])}")
+                lines.append(f"        display_name = {_hcl_str(m.get('display_name', ''))}")
+                lines.append(f"        comment      = {_hcl_str(m.get('comment', ''))}")
+                lines.append(f"        instruction  = {_hcl_str(m.get('instruction', ''))}")
                 lines.append("      },")
             lines.append("    ]")
 
@@ -365,9 +375,13 @@ def format_genie_space_configs_hcl(configs: dict[str, dict]) -> str:
             lines.append("    join_specs = [")
             for j in cfg["join_specs"]:
                 lines.append("      {")
-                lines.append(f"        left_table  = {_hcl_str(j['left_table'])}")
-                lines.append(f"        right_table = {_hcl_str(j['right_table'])}")
-                lines.append(f"        sql         = {_hcl_str(j['sql'])}")
+                lines.append(f"        left_table   = {_hcl_str(j['left_table'])}")
+                lines.append(f"        right_table  = {_hcl_str(j['right_table'])}")
+                lines.append(f"        sql          = {_hcl_str(j['sql'])}")
+                lines.append(f"        comment      = {_hcl_str(j.get('comment', ''))}")
+                lines.append(f"        instruction  = {_hcl_str(j.get('instruction', ''))}")
+                lines.append(f"        left_alias   = {_hcl_str(j.get('left_alias', ''))}")
+                lines.append(f"        right_alias  = {_hcl_str(j.get('right_alias', ''))}")
                 lines.append("      },")
             lines.append("    ]")
 
@@ -403,6 +417,38 @@ def remove_hcl_top_level_block(text: str, key: str) -> str:
                 break
 
     # Strip one surrounding newline to avoid double blank lines
+    block_end = end + 1
+    if block_end < len(text) and text[block_end] == "\n":
+        block_end += 1
+
+    return text[:start] + text[block_end:]
+
+
+def remove_hcl_top_level_list(text: str, key: str) -> str:
+    """Remove a top-level HCL assignment list 'key = [ ... ]' from text.
+
+    Uses bracket counting to correctly handle nested structures.
+    """
+    import re as _re
+
+    pattern = _re.compile(rf"^{_re.escape(key)}\s*=\s*\[", _re.MULTILINE)
+    m = pattern.search(text)
+    if not m:
+        return text
+
+    start = m.start()
+    depth = 0
+    end = m.end() - 1  # position of the opening [
+
+    for i in range(m.end() - 1, len(text)):
+        if text[i] == "[":
+            depth += 1
+        elif text[i] == "]":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+
     block_end = end + 1
     if block_end < len(text) and text[block_end] == "\n":
         block_end += 1
@@ -555,7 +601,8 @@ def build_prompt(ddl_text: str,
                  catalog_schemas: list[tuple[str, str]] | None = None,
                  group_names: list[str] | None = None,
                  per_space_name: str | None = None,
-                 space_names: list[str] | None = None) -> str:
+                 space_names: list[str] | None = None,
+                 mode: str = "full") -> str:
     """Build the full prompt by injecting DDL and optional group names into the template.
 
     When per_space_name is set, an extra instruction is injected telling the LLM
@@ -616,6 +663,36 @@ def build_prompt(ddl_text: str,
             "- Do NOT generate 'group_members' — those are established shared governance state.\n"
             "- The groups to use in fgac_policies and genie ACLs are listed under "
             "REQUIRED GROUP NAMES above. Use them exactly.\n\n"
+        )
+    elif mode == "governance":
+        per_space_instruction = (
+            "\n### GOVERNANCE-ONLY MODE\n\n"
+            "You are generating ABAC governance configuration for a central Data Governance team.\n\n"
+            "IMPORTANT CONSTRAINTS:\n"
+            "- Generate: groups, tag_policies, tag_assignments, fgac_policies, and masking functions.\n"
+            "- Do NOT generate 'genie_space_configs' — Genie space content is managed independently "
+            "by each BU team. Omit the genie_space_configs block entirely from your output.\n"
+            "- Focus on data classification (tags), access policies (FGAC), and masking functions "
+            "that apply to the governed tables regardless of which Genie spaces query them.\n\n"
+        )
+    elif mode == "genie":
+        per_space_instruction = (
+            "\n### GENIE-ONLY MODE\n\n"
+            "You are generating Genie Space configurations for a BU team. "
+            "The ABAC governance (groups, tag policies, tag assignments, FGAC policies, masking "
+            "functions) is managed by a central Data Governance team — do NOT generate any of that.\n\n"
+            "IMPORTANT CONSTRAINTS:\n"
+            "- Generate ONLY: genie_space_configs (with instructions, sample_questions, benchmarks, "
+            "sql_measures, sql_filters, sql_expressions, and join_specs for each Genie Space).\n"
+            "- Do NOT generate 'groups' — use the group names listed under REQUIRED GROUP NAMES.\n"
+            "- Do NOT generate 'tag_policies' — those are managed by the governance team.\n"
+            "- Do NOT generate 'tag_assignments' — those are managed by the governance team.\n"
+            "- Do NOT generate 'fgac_policies' — those are managed by the governance team.\n"
+            "- Do NOT generate any masking SQL functions — those are managed by the governance team.\n"
+            "- Do NOT include any placeholder comments, commented-out examples, or stub lines for "
+            "the omitted sections (e.g. do NOT write '# tag_assignments = []' or similar).\n"
+            "- Output only the HCL code block (genie_space_configs). "
+            "The SQL code block should be empty or omitted.\n\n"
         )
 
     if idx == -1:
@@ -969,20 +1046,106 @@ def call_with_retries(call_fn, prompt: str, model: str, max_retries: int) -> str
     raise RuntimeError(f"All {max_retries} attempts failed. Last error: {last_error}")
 
 
+def fix_hcl_syntax(tfvars_path: Path) -> int:
+    """Repair common HCL syntax errors introduced by the LLM.
+
+    1. Missing commas between consecutive objects in a list.  The LLM
+       sometimes omits the trailing comma after a closing ``}`` before the
+       next ``{``.  Blank lines and comment lines between the two braces
+       are handled correctly.
+    2. Object-style tag_policy values (``values = [{name="v"}]`` →
+       ``values = ["v"]``) — the LLM sometimes copies Terraform resource
+       syntax into the plain-string values list of the ABAC config.
+
+    Returns the number of repairs made.
+    """
+    text = tfvars_path.read_text()
+    original = text
+    repairs = 0
+
+    # ------------------------------------------------------------------
+    # Fix 1: missing commas between adjacent objects in a list.
+    # Strategy: scan line by line.  When we find a line that ends with
+    # just "}" (possibly indented) and the NEXT non-blank, non-comment
+    # line starts with the same or less indentation and a "{", we add a
+    # trailing comma to the "}" line.
+    # ------------------------------------------------------------------
+    lines = text.splitlines(keepends=True)
+    out_lines: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.rstrip('\n').rstrip()
+        # Check if this line ends with an un-trailed closing brace
+        if stripped.endswith('}') and not stripped.endswith('},'):
+            # Look ahead: find the next non-blank, non-comment line
+            j = i + 1
+            while j < len(lines) and (
+                lines[j].strip() == '' or lines[j].lstrip().startswith('#')
+            ):
+                j += 1
+            if j < len(lines):
+                next_stripped = lines[j].lstrip()
+                if next_stripped.startswith('{'):
+                    # Add the missing comma
+                    line = line.rstrip('\n').rstrip() + ',\n'
+                    repairs += 1
+        out_lines.append(line)
+        i += 1
+
+    text = ''.join(out_lines)
+
+    # ------------------------------------------------------------------
+    # Fix 2: convert values = [{name = "v"}, ...] → values = ["v", ...]
+    # ------------------------------------------------------------------
+    def _object_vals_to_strings(m: re.Match) -> str:
+        full = m.group(0)
+        names = re.findall(r'name\s*=\s*"([^"]+)"', full)
+        if names:
+            return 'values = [' + ', '.join(f'"{n}"' for n in names) + ']'
+        return full
+
+    fixed2 = re.sub(
+        r'values\s*=\s*\[\s*\{[^]]*?\}\s*(?:,\s*\{[^]]*?\}\s*)*\]',
+        _object_vals_to_strings,
+        text,
+        flags=re.DOTALL,
+    )
+    if fixed2 != text:
+        repairs += 1
+        text = fixed2
+
+    if text != original:
+        tfvars_path.write_text(text)
+        print(f"  [AUTOFIX] Repaired {repairs} HCL syntax issue(s)")
+
+    return repairs
+
+
 def autofix_tag_policies(tfvars_path: Path) -> int:
     """Add tag values used in assignments/policies but missing from tag_policies."""
     text = tfvars_path.read_text()
 
+    # Map key → (list_of_values, raw_values_text) preserving the EXACT text
+    # from the file so that the replacement uses the original formatting.
     allowed: dict[str, list[str]] = {}
+    raw_vals_text: dict[str, str] = {}  # key → exact captured text inside [...]
     for m in re.finditer(
         r'\{\s*key\s*=\s*"([^"]+)"[^}]*?values\s*=\s*\[([^\]]*)\]',
         text,
         re.DOTALL,
     ):
-        allowed[m.group(1)] = re.findall(r'"([^"]+)"', m.group(2))
+        key = m.group(1)
+        raw = m.group(2)
+        allowed[key] = re.findall(r'"([^"]+)"', raw)
+        raw_vals_text[key] = raw
 
     used: dict[str, set[str]] = {}
-    for m in re.finditer(r'tag_key\s*=\s*"([^"]+)"[^}]*?tag_value\s*=\s*"([^"]+)"', text, re.DOTALL):
+    for m in re.finditer(
+        r'tag_key\s*=\s*"([^"]+)"[^}]*?tag_value\s*=\s*"([^"]+)"',
+        text,
+        re.DOTALL,
+    ):
         used.setdefault(m.group(1), set()).add(m.group(2))
     for m in re.finditer(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", text):
         used.setdefault(m.group(1), set()).add(m.group(2))
@@ -994,14 +1157,18 @@ def autofix_tag_policies(tfvars_path: Path) -> int:
         missing = sorted(used[key] - set(allowed[key]))
         if not missing:
             continue
-        old_vals = ", ".join(f'"{v}"' for v in allowed[key])
+        # Use the RAW captured text as the search key (exact match) so
+        # spacing/formatting differences in the original don't cause misses.
+        # The replacement uses normalized ", " separators.
+        raw_old = raw_vals_text[key]
         new_vals = ", ".join(f'"{v}"' for v in allowed[key] + missing)
         text = text.replace(
-            f'values = [{old_vals}]',
+            f'values = [{raw_old}]',
             f'values = [{new_vals}]',
             1,
         )
         allowed[key].extend(missing)
+        raw_vals_text[key] = new_vals
         added_total += len(missing)
         for val in missing:
             print(f"  [AUTOFIX] Added '{val}' to tag_policy '{key}'")
@@ -1012,16 +1179,322 @@ def autofix_tag_policies(tfvars_path: Path) -> int:
     return added_total
 
 
+def autofix_undefined_tag_refs(tfvars_path: Path) -> int:
+    """Remove tag_assignments and fgac_policies that reference undefined tag_keys.
+
+    The LLM may generate tag_assignments or fgac_policies that use tag_key values
+    not defined in tag_policies.  These produce validation errors.  This function
+    removes such entries so the config can pass validation without requiring manual
+    editing.
+
+    Returns the total number of items removed.
+    """
+    try:
+        import hcl2 as _hcl2  # type: ignore
+    except ImportError:
+        return 0
+
+    text = tfvars_path.read_text()
+
+    try:
+        cfg = _hcl2.loads(text)
+    except Exception:
+        return 0
+
+    # Collect defined tag keys.
+    defined_keys: set[str] = set()
+    for tp in cfg.get("tag_policies", []):
+        k = tp.get("key", "")
+        if k:
+            defined_keys.add(k)
+
+    if not defined_keys:
+        return 0  # nothing to validate against
+
+    total_removed = 0
+
+    # ── Remove tag_assignments with undefined tag_key ──────────────────────
+    assignments = cfg.get("tag_assignments", [])
+    bad_tag_keys_ta: set[str] = set()
+    for ta in assignments:
+        k = ta.get("tag_key", "")
+        if k and k not in defined_keys:
+            bad_tag_keys_ta.add(k)
+
+    if bad_tag_keys_ta:
+        # Remove each assignment block that contains `tag_key = "<bad_key>"`.
+        # Each assignment is a brace-delimited block inside the tag_assignments list.
+        for bad_key in sorted(bad_tag_keys_ta):
+            pattern = re.compile(r'tag_key\s*=\s*"' + re.escape(bad_key) + r'"')
+            while True:
+                m = pattern.search(text)
+                if not m:
+                    break
+                # Find the enclosing { ... } block.
+                pos = m.start()
+                # Walk backward to find the opening {.
+                depth = 0
+                block_start = None
+                i = pos - 1
+                while i >= 0:
+                    c = text[i]
+                    if c == "}":
+                        depth += 1
+                    elif c == "{":
+                        if depth == 0:
+                            block_start = i
+                            break
+                        depth -= 1
+                    i -= 1
+                if block_start is None:
+                    break
+                # Walk forward to find the matching }.
+                depth = 0
+                block_end = None
+                i = block_start
+                while i < len(text):
+                    c = text[i]
+                    if c == "{":
+                        depth += 1
+                    elif c == "}":
+                        depth -= 1
+                        if depth == 0:
+                            block_end = i
+                            break
+                    i += 1
+                if block_end is None:
+                    break
+                # Include any trailing comma and whitespace.
+                end = block_end + 1
+                while end < len(text) and text[end] in (",", " ", "\t"):
+                    end += 1
+                # Include a leading newline if present.
+                start = block_start
+                while start > 0 and text[start - 1] in (" ", "\t"):
+                    start -= 1
+                if start > 0 and text[start - 1] == "\n":
+                    start -= 1
+                text = text[:start] + text[end:]
+                total_removed += 1
+                print(f"  [AUTOFIX] Removed tag_assignment with undefined tag_key '{bad_key}'")
+
+    # ── Remove fgac_policies that reference undefined tag_keys ────────────
+    policies = cfg.get("fgac_policies", [])
+    bad_policy_names: list[str] = []
+    for p in policies:
+        # Collect all condition expressions from this policy.
+        # Policies may use either a top-level match_condition/when_condition
+        # or a nested conditions list with condition fields.
+        cond_exprs: list[str] = []
+        for key in ("match_condition", "when_condition"):
+            val = p.get(key, "")
+            if isinstance(val, list):
+                val = val[0] if val else ""
+            if val:
+                cond_exprs.append(val)
+        for cond_block in p.get("conditions", []):
+            cond_expr = cond_block.get("condition", "") if isinstance(cond_block, dict) else ""
+            if cond_expr:
+                cond_exprs.append(cond_expr)
+
+        for cond_expr in cond_exprs:
+            for m in re.finditer(r"hasTagValue\(\s*'([^']+)'", cond_expr):
+                if m.group(1) not in defined_keys:
+                    pname = p.get("name", "")
+                    if pname and pname not in bad_policy_names:
+                        bad_policy_names.append(pname)
+                        print(
+                            f"  [AUTOFIX] Removing fgac_policy '{pname}': "
+                            f"references undefined tag_key '{m.group(1)}'"
+                        )
+
+    if bad_policy_names:
+        # Reuse the _remove_block logic from autofix_fgac_policy_count inline.
+        def _remove_block(txt: str, block_name: str) -> tuple[str, bool]:
+            name_pat = re.compile(r'name\s*=\s*"' + re.escape(block_name) + r'"')
+            bm = name_pat.search(txt)
+            if not bm:
+                return txt, False
+            pos = bm.start()
+            depth = 0
+            block_start = None
+            i = pos - 1
+            while i >= 0:
+                c = txt[i]
+                if c == "}":
+                    depth += 1
+                elif c == "{":
+                    if depth == 0:
+                        block_start = i
+                        break
+                    depth -= 1
+                i -= 1
+            if block_start is None:
+                return txt, False
+            depth = 0
+            block_end = None
+            i = block_start
+            while i < len(txt):
+                c = txt[i]
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        block_end = i
+                        break
+                i += 1
+            if block_end is None:
+                return txt, False
+            end = block_end + 1
+            while end < len(txt) and txt[end] in (",", " ", "\t"):
+                end += 1
+            start = block_start
+            while start > 0 and txt[start - 1] in (" ", "\t"):
+                start -= 1
+            if start > 0 and txt[start - 1] == "\n":
+                start -= 1
+            return txt[:start] + txt[end:], True
+
+        for pname in bad_policy_names:
+            text, removed = _remove_block(text, pname)
+            if removed:
+                total_removed += 1
+
+    if total_removed:
+        tfvars_path.write_text(text)
+
+    return total_removed
+
+
+def autofix_invalid_tag_values(tfvars_path: Path) -> int:
+    """Remove tag_assignments whose tag_value is not in the allowed values for its tag_key.
+
+    The LLM may generate tag_assignments with tag_values that don't match
+    the values defined in tag_policies (e.g. ``rounded`` instead of
+    ``rounded_amounts``).  This function removes such entries.
+
+    Returns the total number of items removed.
+    """
+    try:
+        import hcl2 as _hcl2  # type: ignore
+    except ImportError:
+        return 0
+
+    text = tfvars_path.read_text()
+
+    try:
+        cfg = _hcl2.loads(text)
+    except Exception:
+        return 0
+
+    # Build map: tag_key → set of allowed values.
+    allowed: dict[str, set[str]] = {}
+    for tp in cfg.get("tag_policies", []):
+        k = tp.get("key", "")
+        vals = tp.get("values", [])
+        if k and vals:
+            allowed[k] = set(vals)
+
+    if not allowed:
+        return 0
+
+    # Find tag_assignments with invalid values.
+    bad_pairs: list[tuple[str, str]] = []  # (tag_key, tag_value)
+    for ta in cfg.get("tag_assignments", []):
+        k = ta.get("tag_key", "")
+        v = ta.get("tag_value", "")
+        if k in allowed and v and v not in allowed[k]:
+            bad_pairs.append((k, v))
+
+    if not bad_pairs:
+        return 0
+
+    total_removed = 0
+    for bad_key, bad_val in bad_pairs:
+        # Find and remove the block containing both tag_key="<bad_key>" and tag_value="<bad_val>"
+        pattern = re.compile(
+            r'tag_key\s*=\s*"' + re.escape(bad_key) + r'"'
+            r'.*?'
+            r'tag_value\s*=\s*"' + re.escape(bad_val) + r'"',
+            re.DOTALL,
+        )
+        # Also check reverse order (tag_value before tag_key)
+        pattern_rev = re.compile(
+            r'tag_value\s*=\s*"' + re.escape(bad_val) + r'"'
+            r'.*?'
+            r'tag_key\s*=\s*"' + re.escape(bad_key) + r'"',
+            re.DOTALL,
+        )
+        while True:
+            m = pattern.search(text) or pattern_rev.search(text)
+            if not m:
+                break
+            pos = m.start()
+            # Walk backward to find the opening {.
+            depth = 0
+            block_start = None
+            i = pos - 1
+            while i >= 0:
+                c = text[i]
+                if c == "}":
+                    depth += 1
+                elif c == "{":
+                    if depth == 0:
+                        block_start = i
+                        break
+                    depth -= 1
+                i -= 1
+            if block_start is None:
+                break
+            # Walk forward to find the matching }.
+            depth = 0
+            block_end = None
+            i = block_start
+            while i < len(text):
+                c = text[i]
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        block_end = i
+                        break
+                i += 1
+            if block_end is None:
+                break
+            # Include trailing comma/whitespace.
+            end = block_end + 1
+            while end < len(text) and text[end] in (",", " ", "\t"):
+                end += 1
+            # Include leading whitespace/newline.
+            start = block_start
+            while start > 0 and text[start - 1] in (" ", "\t"):
+                start -= 1
+            if start > 0 and text[start - 1] == "\n":
+                start -= 1
+            text = text[:start] + text[end:]
+            total_removed += 1
+            print(
+                f"  [AUTOFIX] Removed tag_assignment with invalid value "
+                f"'{bad_val}' for tag_key '{bad_key}'"
+            )
+
+    if total_removed:
+        tfvars_path.write_text(text)
+
+    return total_removed
+
+
 # Databricks platform limit for ABAC column-mask/row-filter policies per catalog.
-_FGAC_PER_CATALOG_LIMIT = 8  # hard cap; platform enforces 10, we use 8 for headroom
+_FGAC_PER_CATALOG_LIMIT = 10  # Databricks platform hard cap
 
 
 def autofix_fgac_policy_count(tfvars_path: Path) -> int:
     """Trim fgac_policies to at most _FGAC_PER_CATALOG_LIMIT per catalog.
 
-    Databricks enforces a hard limit of 10 ABAC policies per catalog.
-    If the LLM produces more, this function removes excess entries (least
-    important ones — those appearing last in the list) and rewrites the file.
+    When trimming is required, preserve coverage of non-public tag assignments
+    first, then drop lower-priority policies such as amount rounding.
 
     Returns the number of policies removed.
     """
@@ -1041,26 +1514,201 @@ def autofix_fgac_policy_count(tfvars_path: Path) -> int:
     if not policies:
         return 0
 
-    # Count per catalog and build list of names to drop (keep first N per catalog).
-    per_catalog: dict[str, list[str]] = {}
-    for p in policies:
+    def _value_requires_coverage(tag_value: str) -> bool:
+        return tag_value.strip().lower() not in {"public", "general", "exact"}
+
+    def _extract_tag_refs(condition: str) -> tuple[list[tuple[str, str]], list[str]]:
+        value_refs = re.findall(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", condition or "")
+        key_refs = re.findall(r"hasTag\(\s*'([^']+)'\s*\)", condition or "")
+        return value_refs, key_refs
+
+    def _condition_matches_tags(condition: str, tags: dict[str, set[str]]) -> bool:
+        if not condition:
+            return True
+        expr = condition
+
+        def repl_value(match: re.Match) -> str:
+            key, value = match.group(1), match.group(2)
+            return str(value in tags.get(key, set()))
+
+        def repl_key(match: re.Match) -> str:
+            key = match.group(1)
+            return str(key in tags and bool(tags[key]))
+
+        expr = re.sub(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", repl_value, expr)
+        expr = re.sub(r"hasTag\(\s*'([^']+)'\s*\)", repl_key, expr)
+        expr = re.sub(r"\bAND\b", " and ", expr)
+        expr = re.sub(r"\bOR\b", " or ", expr)
+        if re.search(r"[^()\sA-Za-z]", expr):
+            return False
+        try:
+            return bool(eval(expr, {"__builtins__": {}}, {}))
+        except Exception:
+            return False
+
+    def _entity_table_name(entity_type: str, entity_name: str) -> str:
+        if entity_type == "tables":
+            return entity_name
+        if entity_type == "columns":
+            return ".".join(entity_name.split(".")[:3])
+        return ""
+
+    def _assignment_priority(entity_name: str, tag_key: str, tag_value: str, entity_type: str) -> int:
+        if entity_type == "tables":
+            key_blob = f"{tag_key} {tag_value} {entity_name}".lower()
+            if any(tok in key_blob for tok in ("aml", "hipaa", "pci", "compliance", "audit")):
+                return 85
+            return 50
+
+        blob = f"{entity_name} {tag_key} {tag_value}".lower()
+        if any(tok in blob for tok in ("ssn", "mrn", "cvv", "pan", "government", "token", "secret", "account_number", "iban")):
+            return 100
+        if any(tok in blob for tok in ("card_number", "credit_card")):
+            return 95
+        if any(tok in blob for tok in ("address", "birth", "dob", "date_of_birth")):
+            return 80
+        if any(tok in blob for tok in ("email", "phone", "name")):
+            return 70
+        if any(tok in blob for tok in ("amount", "balance", "limit", "rounded")):
+            return 20
+        return 40
+
+    assignments = cfg.get("tag_assignments", []) or []
+    entity_tags: dict[tuple[str, str], dict[str, set[str]]] = {}
+    assignment_meta: dict[str, dict] = {}
+    for ta in assignments:
+        etype = ta.get("entity_type", "")
+        ename = ta.get("entity_name", "")
+        tkey = ta.get("tag_key", "")
+        tval = ta.get("tag_value", "")
+        if not (etype and ename and tkey and tval):
+            continue
+        per_entity = entity_tags.setdefault((etype, ename), {})
+        per_entity.setdefault(tkey, set()).add(tval)
+        if not _value_requires_coverage(tval):
+            continue
+        assignment_id = f"{etype}|{ename}|{tkey}|{tval}"
+        assignment_meta[assignment_id] = {
+            "entity_type": etype,
+            "entity_name": ename,
+            "tag_key": tkey,
+            "tag_value": tval,
+            "catalog": ename.split(".")[0],
+            "priority": _assignment_priority(ename, tkey, tval, etype),
+        }
+
+    def _policy_matches_assignment(policy: dict, assignment: dict) -> bool:
+        policy_catalog = policy.get("catalog", "") or policy.get("function_catalog", "")
+        entity_name = assignment["entity_name"]
+        entity_type = assignment["entity_type"]
+        if policy_catalog and policy_catalog != assignment["catalog"]:
+            return False
+
+        table_name = _entity_table_name(entity_type, entity_name)
+        table_tags = entity_tags.get(("tables", table_name), {})
+        if entity_type == "columns":
+            if policy.get("policy_type") != "POLICY_TYPE_COLUMN_MASK":
+                return False
+            column_tags = entity_tags.get(("columns", entity_name), {})
+            if not _condition_matches_tags(policy.get("match_condition", ""), column_tags):
+                return False
+            return _condition_matches_tags(policy.get("when_condition", ""), table_tags)
+
+        if entity_type == "tables":
+            when_condition = policy.get("when_condition", "")
+            if not when_condition:
+                return False
+            return _condition_matches_tags(when_condition, table_tags)
+
+        return False
+
+    per_catalog_policies: dict[str, list[tuple[int, dict]]] = {}
+    for idx, p in enumerate(policies):
         cat = p.get("catalog", "") or p.get("function_catalog", "")
-        name = p.get("name", "")
-        if cat and name:
-            per_catalog.setdefault(cat, []).append(name)
+        if cat:
+            per_catalog_policies.setdefault(cat, []).append((idx, p))
 
     to_drop: set[str] = set()
-    for cat, names in per_catalog.items():
-        if len(names) > _FGAC_PER_CATALOG_LIMIT:
-            excess = names[_FGAC_PER_CATALOG_LIMIT:]
-            to_drop.update(excess)
-            print(
-                f"  [AUTOFIX] Catalog '{cat}': {len(names)} fgac_policies exceeds "
-                f"limit of {_FGAC_PER_CATALOG_LIMIT}. Dropping {len(excess)}: "
-                + ", ".join(excess)
+    assignments_to_remove: list[tuple[str, str, str]] = []  # (tag_key, tag_value, entity_name)
+    for cat, indexed_policies in per_catalog_policies.items():
+        if len(indexed_policies) <= _FGAC_PER_CATALOG_LIMIT:
+            continue
+
+        protected_assignments = {
+            aid: meta for aid, meta in assignment_meta.items() if meta["catalog"] == cat
+        }
+        selected_names: list[str] = []
+        covered_ids: set[str] = set()
+        remaining = list(indexed_policies)
+
+        while remaining and len(selected_names) < _FGAC_PER_CATALOG_LIMIT:
+            best_tuple = None
+            best_idx = None
+            for list_idx, (original_idx, policy) in enumerate(remaining):
+                policy_name = policy.get("name", "")
+                policy_type = policy.get("policy_type", "")
+                coverage = {
+                    aid for aid, meta in protected_assignments.items() if _policy_matches_assignment(policy, meta)
+                }
+                new_coverage = coverage - covered_ids
+                coverage_score = sum(protected_assignments[aid]["priority"] for aid in new_coverage)
+                base_priority = max(
+                    (protected_assignments[aid]["priority"] for aid in coverage),
+                    default=(60 if policy_type == "POLICY_TYPE_ROW_FILTER" else 10),
+                )
+                score = (coverage_score, len(new_coverage), base_priority, -original_idx)
+                if best_tuple is None or score > best_tuple:
+                    best_tuple = score
+                    best_idx = list_idx
+
+            if best_idx is None:
+                break
+            original_idx, chosen = remaining.pop(best_idx)
+            chosen_name = chosen.get("name", "")
+            if not chosen_name:
+                continue
+            selected_names.append(chosen_name)
+            covered_ids.update(
+                aid for aid, meta in protected_assignments.items() if _policy_matches_assignment(chosen, meta)
             )
 
-    if not to_drop:
+        if len(selected_names) < _FGAC_PER_CATALOG_LIMIT:
+            extras = [
+                p.get("name", "")
+                for _idx, p in indexed_policies
+                if p.get("name", "") and p.get("name", "") not in selected_names
+            ]
+            selected_names.extend(extras[: _FGAC_PER_CATALOG_LIMIT - len(selected_names)])
+
+        kept = set(selected_names)
+        dropped = [p.get("name", "") for _idx, p in indexed_policies if p.get("name", "") not in kept]
+        if dropped:
+            to_drop.update(dropped)
+            print(
+                f"  [AUTOFIX] Catalog '{cat}': {len(indexed_policies)} fgac_policies exceeds "
+                f"limit of {_FGAC_PER_CATALOG_LIMIT}. Dropping {len(dropped)}: "
+                + ", ".join(dropped)
+            )
+            uncovered_assignments = [
+                meta
+                for aid, meta in protected_assignments.items()
+                if aid not in covered_ids
+            ]
+            if uncovered_assignments:
+                uncovered_desc = [
+                    f"{meta['entity_name']} ({meta['tag_key']} = '{meta['tag_value']}')"
+                    for meta in uncovered_assignments
+                ]
+                print(
+                    "  [AUTOFIX] Policy cap leaves uncovered sensitive assignments, removing them: "
+                    + ", ".join(uncovered_desc)
+                )
+                assignments_to_remove.extend(
+                    (meta["tag_key"], meta["tag_value"], meta["entity_name"])
+                    for meta in uncovered_assignments
+                )
+
+    if not to_drop and not assignments_to_remove:
         return 0
 
     # Remove each excess policy block from the HCL text using brace counting
@@ -1111,17 +1759,19 @@ def autofix_fgac_policy_count(tfvars_path: Path) -> int:
         if block_end is None:
             return txt, False
 
-        before = txt[:block_start]
-        after  = txt[block_end + 1:]
+        # Determine slice boundaries that include surrounding whitespace and
+        # the trailing comma (same algorithm as autofix_invalid_tag_values so
+        # that the removal always leaves well-formed HCL).
+        end = block_end + 1
+        while end < len(txt) and txt[end] in (",", " ", "\t"):
+            end += 1
+        start = block_start
+        while start > 0 and txt[start - 1] in (" ", "\t"):
+            start -= 1
+        if start > 0 and txt[start - 1] == "\n":
+            start -= 1
 
-        # Remove the comma that immediately follows the closing } (inter-item
-        # separator) — handles removing any element except the last.
-        after = re.sub(r'^\s*,', '', after)
-        # Also remove a trailing comma that now has nothing after it
-        # (handles removing the last element when a preceding element has a comma).
-        before = re.sub(r',(\s*)$', r'\1', before)
-
-        return before + after, True
+        return txt[:start] + txt[end:], True
 
     removed = 0
     for name in to_drop:
@@ -1129,12 +1779,961 @@ def autofix_fgac_policy_count(tfvars_path: Path) -> int:
         if did_remove:
             removed += 1
 
-    if removed:
+    # Remove tag_assignments left uncovered by dropped policies
+    assignments_removed = 0
+    for tag_key, tag_value, entity_name in assignments_to_remove:
+        # Match blocks containing all three: entity_name, tag_key, tag_value
+        pattern = re.compile(
+            r'entity_name\s*=\s*"' + re.escape(entity_name) + r'"'
+            r'.*?'
+            r'tag_key\s*=\s*"' + re.escape(tag_key) + r'"'
+            r'.*?'
+            r'tag_value\s*=\s*"' + re.escape(tag_value) + r'"',
+            re.DOTALL,
+        )
+        # Also check alternate field orderings
+        pattern_rev = re.compile(
+            r'tag_key\s*=\s*"' + re.escape(tag_key) + r'"'
+            r'.*?'
+            r'tag_value\s*=\s*"' + re.escape(tag_value) + r'"'
+            r'.*?'
+            r'entity_name\s*=\s*"' + re.escape(entity_name) + r'"',
+            re.DOTALL,
+        )
+        m = pattern.search(text) or pattern_rev.search(text)
+        if not m:
+            continue
+        pos = m.start()
+        # Walk backward to find the opening {
+        depth = 0
+        block_start = None
+        i = pos - 1
+        while i >= 0:
+            c = text[i]
+            if c == '}':
+                depth += 1
+            elif c == '{':
+                if depth == 0:
+                    block_start = i
+                    break
+                depth -= 1
+            i -= 1
+        if block_start is None:
+            continue
+        # Walk forward to find the matching }
+        depth = 0
+        block_end = None
+        i = block_start
+        while i < len(text):
+            c = text[i]
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    block_end = i
+                    break
+            i += 1
+        if block_end is None:
+            continue
+        end = block_end + 1
+        while end < len(text) and text[end] in (",", " ", "\t"):
+            end += 1
+        start = block_start
+        while start > 0 and text[start - 1] in (" ", "\t"):
+            start -= 1
+        if start > 0 and text[start - 1] == "\n":
+            start -= 1
+        text = text[:start] + text[end:]
+        assignments_removed += 1
+        print(
+            f"  [AUTOFIX] Removed uncovered tag_assignment: "
+            f"{entity_name} ({tag_key} = '{tag_value}')"
+        )
+
+    if removed or assignments_removed:
         # Clean up double-blank lines left by removal
         text = re.sub(r"\n{3,}", "\n\n", text)
         tfvars_path.write_text(text)
 
     return removed
+
+
+def _find_bracket_section(text: str, section_name: str) -> tuple[int, int] | None:
+    """Find the content range of ``section_name = [ ... ]`` using bracket-depth
+    counting so that ``]`` inside quoted strings or nested structures is ignored.
+
+    Returns (start, end) offsets of the *content* between the opening ``[`` and
+    the matching closing ``]``, or None if the section is not found.
+    """
+    pattern = re.compile(rf"\b{re.escape(section_name)}\s*=\s*\[")
+    m = pattern.search(text)
+    if not m:
+        return None
+    depth = 1
+    in_string = False
+    escape_next = False
+    content_start = m.end()
+    for i in range(content_start, len(text)):
+        ch = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\":
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return (content_start, i)
+    return None
+
+
+def _find_brace_blocks(text: str) -> list[tuple[int, int]]:
+    """Return (start, end) ranges for each top-level ``{ ... }`` block in *text*.
+
+    Uses bracket-depth counting and respects quoted strings so that ``}``
+    inside string values does not terminate the block prematurely.
+    """
+    blocks: list[tuple[int, int]] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "{":
+            depth = 1
+            in_string = False
+            escape_next = False
+            start = i
+            j = i + 1
+            while j < len(text) and depth > 0:
+                ch = text[j]
+                if escape_next:
+                    escape_next = False
+                    j += 1
+                    continue
+                if ch == "\\":
+                    escape_next = True
+                    j += 1
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                elif not in_string:
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                j += 1
+            if depth == 0:
+                blocks.append((start, j - 1))  # j-1 points to closing }
+                i = j
+                continue
+        i += 1
+    return blocks
+
+
+def _parse_sql_function_names(sql_path: Path | None) -> set[str]:
+    if not sql_path or not sql_path.exists():
+        return set()
+    text = sql_path.read_text()
+    pattern = re.compile(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+"
+        r"(?:[\w]+\.[\w]+\.)?"
+        r"([\w]+)\s*\(",
+        re.IGNORECASE,
+    )
+    return {m.group(1) for m in pattern.finditer(text)}
+
+
+def _parse_sql_functions_by_schema(sql_path: Path | None) -> dict[tuple[str, str], set[str]]:
+    """Parse SQL file and return {(catalog, schema): {function_names}} mapping."""
+    if not sql_path or not sql_path.exists():
+        return {}
+    text = sql_path.read_text()
+    result: dict[tuple[str, str], set[str]] = {}
+    catalog, schema = None, None
+    for raw_stmt in re.split(r";\s*(?:--[^\n]*)?\n", text):
+        lines = [
+            line for line in raw_stmt.split("\n")
+            if line.strip() and not line.strip().startswith("--")
+        ]
+        stmt = "\n".join(lines).strip()
+        if not stmt:
+            continue
+        m = re.match(r"USE\s+CATALOG\s+(\S+)", stmt, re.IGNORECASE)
+        if m:
+            catalog = m.group(1)
+            continue
+        m = re.match(r"USE\s+SCHEMA\s+(\S+)", stmt, re.IGNORECASE)
+        if m:
+            schema = m.group(1)
+            continue
+        fn_m = re.search(
+            r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+"
+            r"(?:[\w]+\.[\w]+\.)?([\w]+)\s*\(",
+            stmt, re.IGNORECASE,
+        )
+        if fn_m and catalog and schema:
+            result.setdefault((catalog, schema), set()).add(fn_m.group(1))
+    return result
+
+
+def _infer_column_categories(entity_name: str) -> set[str]:
+    col = entity_name.split(".")[-1].lower()
+    categories: set[str] = set()
+    if "email" in col:
+        categories.add("email")
+    if "phone" in col or "mobile" in col:
+        categories.add("phone")
+    return categories
+
+
+def autofix_ambiguous_tag_values(tfvars_path: Path) -> int:
+    """Normalize ambiguous mixed-type tag values to type-safe concrete values."""
+    text = tfvars_path.read_text()
+    section = _find_bracket_section(text, "tag_assignments")
+    if section is None:
+        return 0
+
+    sec_start, sec_end = section
+    section_text = text[sec_start:sec_end]
+    blocks = _find_brace_blocks(section_text)
+    if not blocks:
+        return 0
+
+    rewritten = section_text
+    updates = 0
+    for blk_start, blk_end in reversed(blocks):
+        block_text = rewritten[blk_start:blk_end + 1]
+        entity_type_match = re.search(r'^\s*entity_type\s*=\s*"([^"]+)"', block_text, re.MULTILINE)
+        entity_name_match = re.search(r'^\s*entity_name\s*=\s*"([^"]+)"', block_text, re.MULTILINE)
+        tag_key_match = re.search(r'^\s*tag_key\s*=\s*"([^"]+)"', block_text, re.MULTILINE)
+        tag_value_match = re.search(r'^\s*tag_value\s*=\s*"([^"]+)"', block_text, re.MULTILINE)
+        if not (entity_type_match and entity_name_match and tag_key_match and tag_value_match):
+            continue
+
+        entity_type = entity_type_match.group(1)
+        entity_name = entity_name_match.group(1)
+        tag_key = tag_key_match.group(1)
+        tag_value = tag_value_match.group(1)
+        if entity_type != "columns" or tag_value != "masked_contact":
+            continue
+
+        categories = _infer_column_categories(entity_name)
+        if categories == {"email"}:
+            normalized_value = "masked_email"
+        elif categories == {"phone"}:
+            normalized_value = "masked_phone"
+        else:
+            continue
+
+        updated_block = re.sub(
+            r'(^\s*tag_value\s*=\s*")masked_contact(")',
+            rf"\1{normalized_value}\2",
+            block_text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if updated_block == block_text:
+            continue
+
+        rewritten = rewritten[:blk_start] + updated_block + rewritten[blk_end + 1:]
+        updates += 1
+        print(
+            f"  [AUTOFIX] Normalized {tag_key} on '{entity_name}' "
+            f"from 'masked_contact' to '{normalized_value}'"
+        )
+
+    if not updates:
+        return 0
+
+    text = text[:sec_start] + rewritten + text[sec_end:]
+    tfvars_path.write_text(text)
+    return updates
+
+
+def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = None) -> int:
+    """Add fgac_policies for uncovered non-public tag assignments when possible."""
+    try:
+        import hcl2  # type: ignore
+    except ImportError:
+        return 0
+
+    text = tfvars_path.read_text()
+    try:
+        cfg = hcl2.loads(text)
+    except Exception:
+        return 0
+
+    policies = cfg.get("fgac_policies", []) or []
+    assignments = cfg.get("tag_assignments", []) or []
+    groups = list((cfg.get("groups") or {}).keys())
+    if not assignments:
+        return 0
+
+    available_functions = _parse_sql_function_names(sql_path)
+
+    def _extract_tag_refs(condition: str) -> tuple[list[tuple[str, str]], list[str]]:
+        value_refs = re.findall(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", condition or "")
+        key_refs = re.findall(r"hasTag\(\s*'([^']+)'\s*\)", condition or "")
+        return value_refs, key_refs
+
+    def _condition_matches_tags(condition: str, tags: dict[str, set[str]]) -> bool:
+        if not condition:
+            return True
+        expr = condition
+
+        def repl_value(match: re.Match) -> str:
+            key, value = match.group(1), match.group(2)
+            return str(value in tags.get(key, set()))
+
+        def repl_key(match: re.Match) -> str:
+            key = match.group(1)
+            return str(key in tags and bool(tags[key]))
+
+        expr = re.sub(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", repl_value, expr)
+        expr = re.sub(r"hasTag\(\s*'([^']+)'\s*\)", repl_key, expr)
+        expr = re.sub(r"\bAND\b", " and ", expr)
+        expr = re.sub(r"\bOR\b", " or ", expr)
+        if re.search(r"[^()\sA-Za-z]", expr):
+            return False
+        try:
+            return bool(eval(expr, {"__builtins__": {}}, {}))
+        except Exception:
+            return False
+
+    def _entity_table_name(entity_type: str, entity_name: str) -> str:
+        if entity_type == "tables":
+            return entity_name
+        if entity_type == "columns":
+            return ".".join(entity_name.split(".")[:3])
+        return ""
+
+    def _value_requires_coverage(tag_value: str) -> bool:
+        return tag_value.strip().lower() not in {"public", "general", "exact"}
+
+    def _assignment_priority(assignment: dict) -> int:
+        etype = assignment.get("entity_type", "")
+        ename = assignment.get("entity_name", "")
+        tkey = assignment.get("tag_key", "")
+        tval = assignment.get("tag_value", "")
+        blob = f"{ename} {tkey} {tval}".lower()
+        if etype == "tables":
+            if any(tok in blob for tok in ("aml", "hipaa", "pci", "compliance", "audit")):
+                return 85
+            return 50
+        if any(tok in blob for tok in ("ssn", "mrn", "cvv", "pan", "government", "token", "secret")):
+            return 100
+        if any(tok in blob for tok in ("card_number", "credit_card", "iban", "account_number")):
+            return 95
+        if any(tok in blob for tok in ("address", "birth", "dob", "date_of_birth")):
+            return 80
+        if any(tok in blob for tok in ("email", "phone", "name")):
+            return 70
+        if any(tok in blob for tok in ("amount", "balance", "limit", "rounded")):
+            return 20
+        return 40
+
+    def _normalize_name_component(value: str) -> str:
+        return re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", value.lower())).strip("_")
+
+    def _format_string_list(values: list[str]) -> str:
+        return "[" + ", ".join(f'"{v}"' for v in values) + "]"
+
+    def _policy_block(policy: dict) -> str:
+        lines = ["  {"]
+        ordered_keys = [
+            "name",
+            "policy_type",
+            "catalog",
+            "to_principals",
+            "except_principals",
+            "comment",
+            "match_condition",
+            "when_condition",
+            "match_alias",
+            "function_name",
+            "function_catalog",
+            "function_schema",
+        ]
+        for key in ordered_keys:
+            if key not in policy or policy[key] in (None, "", []):
+                continue
+            value = policy[key]
+            rendered = _format_string_list(value) if isinstance(value, list) else f'"{value}"'
+            lines.append(f"    {key:<16} = {rendered}")
+        lines.append("  }")
+        return "\n".join(lines)
+
+    def _infer_function(assignment: dict) -> str | None:
+        ename = assignment.get("entity_name", "").lower()
+        tkey = assignment.get("tag_key", "").lower()
+        tval = assignment.get("tag_value", "").lower()
+        blob = f"{ename} {tkey} {tval}"
+        preferred: list[str] = []
+        if assignment.get("entity_type") == "tables":
+            if any(tok in blob for tok in ("pci", "card")):
+                preferred.extend([
+                    "filter_pci_authorized", "filter_pci_compliance_only",
+                    "filter_pci_only", "filter_compliance_only",
+                ])
+            if any(tok in blob for tok in ("aml", "hipaa", "compliance", "audit")):
+                preferred.extend([
+                    "filter_compliance_only", "filter_hipaa_compliance",
+                    "filter_aml_compliance", "filter_aml_only",
+                ])
+            if any(tok in blob for tok in ("phi", "hipaa", "clinical", "patient")):
+                preferred.extend([
+                    "filter_hipaa_compliance", "filter_phi_only",
+                    "filter_clinical_only", "filter_compliance_only",
+                ])
+            if any(tok in blob for tok in ("pii", "personal")):
+                preferred.extend(["filter_pii_authorized", "filter_compliance_only"])
+        else:
+            if any(tok in blob for tok in ("ssn", "social_security")):
+                preferred.append("mask_ssn")
+            if "email" in blob:
+                preferred.append("mask_email")
+            if "phone" in blob or "mobile" in blob:
+                preferred.append("mask_phone")
+            if "name" in blob:
+                preferred.extend(["mask_full_name", "mask_pii_partial"])
+            if "address" in blob:
+                preferred.extend(["mask_redact", "mask_pii_partial"])
+            if any(tok in blob for tok in ("birth", "dob", "date_of_birth")):
+                preferred.append("mask_date_to_year")
+            if "cvv" in blob:
+                preferred.append("mask_redact")
+            if any(tok in blob for tok in ("card_number", "credit_card", "pci")):
+                if "last4" in blob:
+                    preferred.extend(["mask_credit_card_last4", "mask_credit_card_full"])
+                else:
+                    preferred.extend(["mask_credit_card_full", "mask_credit_card_last4"])
+            if any(tok in blob for tok in ("amount", "balance", "limit", "rounded")):
+                preferred.append("mask_amount_rounded")
+            if "diagnosis" in blob:
+                preferred.append("mask_diagnosis_code")
+            if any(tok in blob for tok in ("note", "notes", "desc", "description")):
+                preferred.append("mask_redact")
+        # Only add generic masking fallbacks for column-level assignments.
+        # Row filter functions must take 0 arguments; masking functions take 1.
+        if assignment.get("entity_type") != "tables":
+            preferred.extend(["mask_redact", "mask_nullify", "mask_pii_partial"])
+        for fn in preferred:
+            if not available_functions or fn in available_functions:
+                return fn
+        # Last-resort: pick any available function of the right type from the SQL
+        # file rather than returning None (which causes the autofix to skip adding
+        # coverage and lets validation fail). Row filters take 0 args; column masks
+        # take 1, so we look for the appropriate naming convention.
+        if available_functions:
+            if assignment.get("entity_type") == "tables":
+                filter_fns = sorted(f for f in available_functions if f.startswith("filter_"))
+                if filter_fns:
+                    return filter_fns[0]
+            else:
+                mask_fns = sorted(f for f in available_functions if f.startswith("mask_"))
+                if mask_fns:
+                    return mask_fns[0]
+        return None
+
+    def _policy_matches_assignment(
+        policy: dict,
+        assignment: dict,
+        entity_tags: dict[tuple[str, str], dict[str, set[str]]],
+    ) -> bool:
+        policy_catalog = policy.get("catalog", "") or policy.get("function_catalog", "")
+        entity_name = assignment.get("entity_name", "")
+        entity_type = assignment.get("entity_type", "")
+        entity_catalog = entity_name.split(".")[0] if entity_name else ""
+        if policy_catalog and entity_catalog and policy_catalog != entity_catalog:
+            return False
+        table_name = _entity_table_name(entity_type, entity_name)
+        table_tags = entity_tags.get(("tables", table_name), {})
+        if entity_type == "columns":
+            if policy.get("policy_type") != "POLICY_TYPE_COLUMN_MASK":
+                return False
+            column_tags = entity_tags.get(("columns", entity_name), {})
+            if not _condition_matches_tags(policy.get("match_condition", ""), column_tags):
+                return False
+            return _condition_matches_tags(policy.get("when_condition", ""), table_tags)
+        if entity_type == "tables":
+            when_condition = policy.get("when_condition", "")
+            if not when_condition:
+                return False
+            return _condition_matches_tags(when_condition, table_tags)
+        return False
+
+    def _find_template_policy(catalog: str, policy_type: str, tag_key: str) -> dict | None:
+        same_catalog = [
+            p for p in policies
+            if (p.get("catalog", "") or p.get("function_catalog", "")) == catalog
+            and p.get("policy_type") == policy_type
+        ]
+        for p in same_catalog:
+            value_refs, key_refs = _extract_tag_refs(
+                (p.get("match_condition") or "") + " " + (p.get("when_condition") or "")
+            )
+            if any(key == tag_key for key, _ in value_refs) or tag_key in key_refs:
+                return p
+        return same_catalog[0] if same_catalog else None
+
+    entity_tags: dict[tuple[str, str], dict[str, set[str]]] = {}
+    for ta in assignments:
+        etype = ta.get("entity_type", "")
+        ename = ta.get("entity_name", "")
+        tkey = ta.get("tag_key", "")
+        tval = ta.get("tag_value", "")
+        if not (etype and ename and tkey and tval):
+            continue
+        per_entity = entity_tags.setdefault((etype, ename), {})
+        per_entity.setdefault(tkey, set()).add(tval)
+
+    existing_names = {p.get("name", "") for p in policies if p.get("name")}
+    uncovered = [
+        ta for ta in assignments
+        if _value_requires_coverage(ta.get("tag_value", ""))
+        and not any(_policy_matches_assignment(p, ta, entity_tags) for p in policies)
+    ]
+    uncovered.sort(key=_assignment_priority, reverse=True)
+
+    new_policies: list[dict] = []
+    for ta in uncovered:
+        entity_type = ta.get("entity_type", "")
+        entity_name = ta.get("entity_name", "")
+        tag_key = ta.get("tag_key", "")
+        tag_value = ta.get("tag_value", "")
+        if not (entity_type and entity_name and tag_key and tag_value):
+            continue
+        catalog, schema = entity_name.split(".")[:2]
+        policy_type = "POLICY_TYPE_ROW_FILTER" if entity_type == "tables" else "POLICY_TYPE_COLUMN_MASK"
+        fn = _infer_function(ta)
+        if not fn:
+            continue
+        template = _find_template_policy(catalog, policy_type, tag_key)
+        if template:
+            to_principals = list(template.get("to_principals", []) or [])
+            except_principals = list(template.get("except_principals", []) or [])
+        else:
+            admin_like = [g for g in groups if re.search(r"admin|compliance|authorized", g, re.IGNORECASE)]
+            non_admin = [g for g in groups if g not in admin_like]
+            to_principals = non_admin or groups[:1]
+            except_principals = []
+
+        action = "filter" if policy_type == "POLICY_TYPE_ROW_FILTER" else "mask"
+        base_name = _normalize_name_component(f"auto_{action}_{catalog}_{tag_key}_{tag_value}")
+        name = base_name
+        suffix = 2
+        while name in existing_names:
+            name = f"{base_name}_{suffix}"
+            suffix += 1
+        existing_names.add(name)
+
+        policy = {
+            "name": name,
+            "policy_type": policy_type,
+            "catalog": catalog,
+            "to_principals": to_principals,
+            "comment": f"Auto-repaired coverage for {entity_name} ({tag_key} = '{tag_value}')",
+            "function_name": fn,
+            "function_catalog": catalog,
+            "function_schema": schema,
+        }
+        if except_principals:
+            policy["except_principals"] = except_principals
+        if policy_type == "POLICY_TYPE_COLUMN_MASK":
+            policy["match_condition"] = f"hasTagValue('{tag_key}', '{tag_value}')"
+            policy["match_alias"] = _normalize_name_component(f"{tag_key}_{tag_value}")[:60]
+        else:
+            policy["when_condition"] = f"hasTagValue('{tag_key}', '{tag_value}')"
+
+        new_policies.append(policy)
+        policies.append(policy)
+
+    if not new_policies:
+        return 0
+
+    section = _find_bracket_section(text, "fgac_policies")
+    if section is None:
+        return 0
+    sec_start, sec_end = section
+    section_text = text[sec_start:sec_end]
+    trimmed = section_text.rstrip()
+    blocks_text = ",\n".join(_policy_block(p) for p in new_policies)
+    if trimmed.strip():
+        separator = "\n" if trimmed.endswith(",") else ",\n"
+        new_section_text = trimmed + separator + blocks_text + "\n"
+    else:
+        new_section_text = "\n" + blocks_text + "\n"
+    text = text[:sec_start] + new_section_text + text[sec_end:]
+    tfvars_path.write_text(text)
+
+    for p in new_policies:
+        print(
+            f"  [AUTOFIX] Added fgac_policy '{p['name']}' for "
+            f"{p.get('match_condition') or p.get('when_condition')}"
+        )
+    return len(new_policies)
+
+
+def autofix_genie_config_fields(tfvars_path: Path) -> int:
+    """Ensure sql_filters/sql_expressions/sql_measures/join_specs objects have
+    all required fields (comment, instruction, display_name, etc.).
+
+    The LLM sometimes omits optional-looking fields that Terraform actually requires.
+    Uses bracket-depth counting (not regex) to correctly handle ``]`` or ``}``
+    inside quoted SQL strings.
+    Returns the number of fields added.
+    """
+    text = tfvars_path.read_text()
+    added = 0
+
+    # Required fields for each section type and the defaults to inject
+    section_required: dict[str, list[str]] = {
+        "sql_filters": ["sql", "display_name", "comment", "instruction"],
+        "sql_expressions": ["alias", "sql", "display_name", "comment", "instruction"],
+        "sql_measures": ["alias", "sql", "display_name", "comment", "instruction"],
+        "join_specs": [
+            "left_table", "right_table", "sql",
+            "comment", "instruction", "left_alias", "right_alias",
+        ],
+    }
+
+    for section, required_fields in section_required.items():
+        # Find ALL occurrences of this section in the file (there may be one
+        # per genie space in an assembled multi-space file).  Process in
+        # reverse order so that earlier offsets are not shifted by edits.
+        all_ranges: list[tuple[int, int]] = []
+        search_start = 0
+        while True:
+            rng = _find_bracket_section(text[search_start:], section)
+            if rng is None:
+                break
+            all_ranges.append((search_start + rng[0], search_start + rng[1]))
+            search_start += rng[1] + 1  # skip past the closing ]
+
+        for sec_start, sec_end in reversed(all_ranges):
+            section_text = text[sec_start:sec_end]
+
+            # Find each { ... } block inside the section content
+            blocks = _find_brace_blocks(section_text)
+            if not blocks:
+                continue
+
+            # Process blocks in reverse order so edits don't shift earlier offsets
+            new_section = section_text
+            for blk_start, blk_end in reversed(blocks):
+                # block_content is the text BETWEEN { and }
+                block_content = new_section[blk_start + 1 : blk_end]
+                existing_keys = set(
+                    m.group(1)
+                    for m in re.finditer(r"^\s*(\w+)\s*=", block_content, re.MULTILINE)
+                )
+                missing = [f for f in required_fields if f not in existing_keys]
+                if not missing:
+                    continue
+                # Find the indentation from an existing field
+                indent_match = re.search(r"^(\s+)\w+\s*=", block_content, re.MULTILINE)
+                indent = indent_match.group(1) if indent_match else "        "
+                extra_lines = "\n".join(f'{indent}{f} = ""' for f in missing)
+                # Preserve indentation: strip trailing whitespace from existing
+                # content, append missing fields, then re-add proper indent before }
+                stripped = block_content.rstrip()
+                # Detect indent of the closing brace (one level less than field indent)
+                brace_indent = indent[:-2] if len(indent) >= 2 else "      "
+                new_block_content = stripped + "\n" + extra_lines + "\n" + brace_indent
+                new_section = (
+                    new_section[: blk_start + 1]
+                    + new_block_content
+                    + new_section[blk_end:]
+                )
+                added += len(missing)
+
+            if new_section != section_text:
+                text = text[:sec_start] + new_section + text[sec_end:]
+
+    if added:
+        tfvars_path.write_text(text)
+    return added
+
+
+_GENERIC_FUNCTION_PREFS = ["mask_pii_partial", "mask_redact", "mask_nullify", "mask_hash"]
+_GENERIC_SAFE_FUNCTIONS = {"mask_pii_partial", "mask_redact", "mask_nullify", "mask_hash"}
+_FUNCTION_EXPECTED_CATEGORIES = {
+    "mask_email": {"email"},
+    "mask_phone": {"phone"},
+    "mask_ssn": {"ssn"},
+    "mask_full_name": {"name"},
+    "mask_credit_card_full": {"card"},
+    "mask_credit_card_last4": {"card"},
+    "mask_amount_rounded": {"amount"},
+    "mask_date_to_year": {"date"},
+    "mask_timestamp_to_day": {"date"},
+}
+
+
+def _infer_column_categories_full(entity_name: str) -> set[str]:
+    """Comprehensive column category inference matching validate_abac.py."""
+    col = entity_name.split(".")[-1].lower()
+    categories: set[str] = set()
+    if "email" in col:
+        categories.add("email")
+    if "phone" in col or "mobile" in col:
+        categories.add("phone")
+    if "ssn" in col or "social_security" in col:
+        categories.add("ssn")
+    if "name" in col:
+        categories.add("name")
+    if "address" in col:
+        categories.add("address")
+    if "birth" in col or col in {"dob", "date_of_birth"}:
+        categories.add("date")
+    if "card" in col or "cvv" in col or "pan" in col:
+        categories.add("card")
+    if "amount" in col or "balance" in col or "limit" in col:
+        categories.add("amount")
+    return categories or {"generic"}
+
+
+def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = None) -> int:
+    """Fix FGAC policies referencing functions that don't exist in the SQL file."""
+    if not sql_path or not sql_path.exists():
+        return 0
+    try:
+        import hcl2
+    except ImportError:
+        return 0
+
+    text = tfvars_path.read_text()
+    try:
+        cfg = hcl2.loads(text)
+    except Exception:
+        return 0
+
+    policies = cfg.get("fgac_policies", []) or []
+    if not policies:
+        return 0
+
+    functions_by_schema = _parse_sql_functions_by_schema(sql_path)
+    if not functions_by_schema:
+        return 0
+
+    replacements: list[tuple[str, str, str, str, str]] = []
+    for p in policies:
+        fn = p.get("function_name", "")
+        fn_cat = p.get("function_catalog", "")
+        fn_sch = p.get("function_schema", "")
+        pname = p.get("name", "")
+        if not fn or not fn_cat or not fn_sch:
+            continue
+
+        target_fns = functions_by_schema.get((fn_cat, fn_sch), set())
+        if fn in target_fns:
+            continue
+
+        # Function not in target schema. Check other schemas in same catalog.
+        found_schema = None
+        for (cat, sch), fns in functions_by_schema.items():
+            if cat == fn_cat and fn in fns:
+                found_schema = sch
+                break
+        if found_schema:
+            replacements.append((pname, fn, fn, fn_sch, found_schema))
+            continue
+
+        # Try generic functions in target schema
+        new_fn, new_sch = None, fn_sch
+        for gfn in _GENERIC_FUNCTION_PREFS:
+            if gfn in target_fns:
+                new_fn = gfn
+                break
+
+        # Try generic functions in other schemas of same catalog
+        if not new_fn:
+            for (cat, sch), fns in functions_by_schema.items():
+                if cat != fn_cat:
+                    continue
+                for gfn in _GENERIC_FUNCTION_PREFS:
+                    if gfn in fns:
+                        new_fn = gfn
+                        new_sch = sch
+                        break
+                if new_fn:
+                    break
+
+        if new_fn:
+            replacements.append((pname, fn, new_fn, fn_sch, new_sch))
+
+    if not replacements:
+        return 0
+
+    section = _find_bracket_section(text, "fgac_policies")
+    if section is None:
+        return 0
+    sec_start, sec_end = section
+    section_text = text[sec_start:sec_end]
+    blocks = _find_brace_blocks(section_text)
+
+    rewritten = section_text
+    fixes = 0
+    for blk_start, blk_end in reversed(blocks):
+        block_text = rewritten[blk_start:blk_end + 1]
+        name_m = re.search(r'^\s*name\s*=\s*"([^"]+)"', block_text, re.MULTILINE)
+        if not name_m:
+            continue
+        pname = name_m.group(1)
+
+        matching = [r for r in replacements if r[0] == pname]
+        if not matching:
+            continue
+        _, old_fn, new_fn, old_sch, new_sch = matching[0]
+
+        updated = block_text
+        if old_fn != new_fn:
+            updated = re.sub(
+                rf'(^\s*function_name\s*=\s*"){re.escape(old_fn)}(")',
+                rf"\g<1>{new_fn}\g<2>",
+                updated, count=1, flags=re.MULTILINE,
+            )
+        if old_sch != new_sch:
+            updated = re.sub(
+                rf'(^\s*function_schema\s*=\s*"){re.escape(old_sch)}(")',
+                rf"\g<1>{new_sch}\g<2>",
+                updated, count=1, flags=re.MULTILINE,
+            )
+        if updated != block_text:
+            rewritten = rewritten[:blk_start] + updated + rewritten[blk_end + 1:]
+            fixes += 1
+            print(
+                f"  [AUTOFIX] Fixed function ref in policy '{pname}': "
+                f"{old_fn}@{old_sch} -> {new_fn}@{new_sch}"
+            )
+
+    if not fixes:
+        return 0
+
+    text = text[:sec_start] + rewritten + text[sec_end:]
+    tfvars_path.write_text(text)
+    return fixes
+
+
+def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None = None) -> int:
+    """Fix policies using type-specific functions for columns with mismatched categories."""
+    try:
+        import hcl2
+    except ImportError:
+        return 0
+
+    text = tfvars_path.read_text()
+    try:
+        cfg = hcl2.loads(text)
+    except Exception:
+        return 0
+
+    policies = cfg.get("fgac_policies", []) or []
+    assignments = cfg.get("tag_assignments", []) or []
+    if not policies or not assignments:
+        return 0
+
+    available_functions = _parse_sql_function_names(sql_path)
+
+    assignments_by_tag: dict[tuple[str, str], list[dict]] = {}
+    for ta in assignments:
+        if ta.get("entity_type") != "columns":
+            continue
+        assignments_by_tag.setdefault(
+            (ta.get("tag_key", ""), ta.get("tag_value", "")), []
+        ).append(ta)
+
+    def _extract_tag_refs(condition: str) -> tuple[list[tuple[str, str]], list[str]]:
+        value_refs = re.findall(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", condition or "")
+        key_refs = re.findall(r"hasTag\(\s*'([^']+)'\s*\)", condition or "")
+        return value_refs, key_refs
+
+    replacements: list[tuple[str, str, str]] = []
+    for p in policies:
+        if p.get("policy_type") != "POLICY_TYPE_COLUMN_MASK":
+            continue
+        fn = p.get("function_name", "")
+        if fn in _GENERIC_SAFE_FUNCTIONS:
+            continue
+        expected = _FUNCTION_EXPECTED_CATEGORIES.get(fn)
+        if not expected:
+            continue
+
+        value_refs, key_refs = _extract_tag_refs(p.get("match_condition", ""))
+        matched: list[dict] = []
+        for key, value in value_refs:
+            matched.extend(assignments_by_tag.get((key, value), []))
+        for key in key_refs:
+            for (tag_key, _), items in assignments_by_tag.items():
+                if tag_key == key:
+                    matched.extend(items)
+        if not matched:
+            continue
+
+        categories = set()
+        for ta in matched:
+            categories.update(_infer_column_categories_full(ta.get("entity_name", "")))
+        if categories.issubset(expected):
+            continue
+
+        generic_fn = None
+        for gfn in _GENERIC_FUNCTION_PREFS:
+            if not available_functions or gfn in available_functions:
+                generic_fn = gfn
+                break
+        if generic_fn:
+            replacements.append((p.get("name", ""), fn, generic_fn))
+
+    if not replacements:
+        return 0
+
+    section = _find_bracket_section(text, "fgac_policies")
+    if section is None:
+        return 0
+    sec_start, sec_end = section
+    section_text = text[sec_start:sec_end]
+    blocks = _find_brace_blocks(section_text)
+
+    rewritten = section_text
+    fixes = 0
+    for blk_start, blk_end in reversed(blocks):
+        block_text = rewritten[blk_start:blk_end + 1]
+        name_m = re.search(r'^\s*name\s*=\s*"([^"]+)"', block_text, re.MULTILINE)
+        if not name_m:
+            continue
+        pname = name_m.group(1)
+
+        matching = [r for r in replacements if r[0] == pname]
+        if not matching:
+            continue
+        _, old_fn, new_fn = matching[0]
+
+        updated = re.sub(
+            rf'(^\s*function_name\s*=\s*"){re.escape(old_fn)}(")',
+            rf"\g<1>{new_fn}\g<2>",
+            block_text, count=1, flags=re.MULTILINE,
+        )
+        if updated != block_text:
+            rewritten = rewritten[:blk_start] + updated + rewritten[blk_end + 1:]
+            fixes += 1
+            print(
+                f"  [AUTOFIX] Fixed function category mismatch in policy '{pname}': "
+                f"'{old_fn}' -> '{new_fn}'"
+            )
+
+    if not fixes:
+        return 0
+
+    text = text[:sec_start] + rewritten + text[sec_end:]
+    tfvars_path.write_text(text)
+    return fixes
 
 
 def sanitize_space_key(name: str) -> str:
@@ -1297,6 +2896,24 @@ def main():
              "the new space's content — other spaces are untouched. "
              "Example: make generate SPACE=\"Finance Analytics\"",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["full", "governance", "genie"],
+        default="full",
+        help=(
+            "Generation mode for decentralized deployments (default: full). "
+            "governance — generate ABAC only (groups, tag policies, tag assignments, "
+            "FGAC policies, masking functions); genie_space_configs is suppressed. "
+            "Use this for the central Data Governance team. "
+            "genie — generate Genie space configs only (instructions, benchmarks, "
+            "SQL measures/filters/expressions, join specs); all ABAC output and SQL "
+            "masking functions are suppressed. Existing groups are auto-loaded. "
+            "Use this for BU teams that consume pre-existing governance. "
+            "full — generate everything (default, backward-compatible). "
+            "Example: make generate MODE=governance  (governance team) "
+            "         make generate MODE=genie       (BU team)"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -1308,6 +2925,12 @@ def main():
     print("  ABAC Configuration Generator")
     if args.space:
         print(f"  Mode: per-space — '{args.space}'")
+    elif args.mode != "full":
+        mode_labels = {
+            "governance": "governance — ABAC only (no genie_space_configs)",
+            "genie":      "genie — Genie configs only (no ABAC, no masking SQL)",
+        }
+        print(f"  Mode: {mode_labels.get(args.mode, args.mode)}")
     print("=" * 60)
 
     auth_cfg = load_auth_config(auth_file)
@@ -1348,6 +2971,14 @@ def main():
             existing_groups = load_groups_from_account_config()
             if existing_groups:
                 args.groups = ",".join(existing_groups)
+
+    # In genie mode, also auto-load groups from account config so the LLM knows
+    # which pre-existing groups are available for space ACLs.
+    if args.mode == "genie" and not args.space and not args.groups:
+        existing_groups = load_groups_from_account_config()
+        if existing_groups:
+            args.groups = ",".join(existing_groups)
+            print(f"  Auto-loaded {len(existing_groups)} group(s) from account config (genie mode)")
 
     catalog = args.catalog or ""
     schema = args.schema or ""
@@ -1500,6 +3131,7 @@ def main():
         group_names=group_names,
         per_space_name=args.space if args.space else None,
         space_names=configured_space_names,
+        mode=args.mode,
     )
 
     if args.dry_run:
@@ -1581,6 +3213,11 @@ Before you apply, tune for your business roles, security requirements, and Genie
     tuning_path.write_text(tuning_md)
     print(f"  Tuning checklist written to: {tuning_path}")
 
+    if sql_block and args.mode == "genie":
+        # Genie mode: masking functions are owned by the governance team; discard SQL output.
+        print("  [genie mode] Skipping masking_functions.sql (managed by governance team)")
+        sql_block = None
+
     if sql_block:
         all_cs = catalog_schemas if catalog_schemas else [(catalog, schema)]
         targets = ", ".join(f"{c}.{s}" for c, s in all_cs)
@@ -1600,21 +3237,57 @@ Before you apply, tune for your business roles, security requirements, and Genie
         print(f"    Target schemas: {targets}")
 
     if hcl_block:
-        hcl_header = (
-            "# ============================================================================\n"
-            "# GENERATED ABAC CONFIG (FIRST DRAFT)\n"
-            "# ============================================================================\n"
-            "# NOTE: Authentication comes from auth.auto.tfvars, environment from env.auto.tfvars.\n"
-            "# Tune the following before apply:\n"
-            "# - groups (business roles)\n"
-            "# - tag_assignments (what data is considered sensitive)\n"
-            "# - fgac_policies (who sees what, and how)\n"
-            "# Then validate before promoting into shared account + workspace config:\n"
-            "#   python validate_abac.py generated/abac.auto.tfvars generated/masking_functions.sql\n"
-            "# ============================================================================\n\n"
-        )
+        if args.mode == "genie":
+            hcl_header = (
+                "# ============================================================================\n"
+                "# GENERATED GENIE CONFIG (FIRST DRAFT — genie mode)\n"
+                "# ============================================================================\n"
+                "# NOTE: ABAC governance (groups, tag policies, tag assignments, masking\n"
+                "# functions) is owned by the central Data Governance team and is NOT\n"
+                "# generated here.  Only genie_space_configs is produced in this mode.\n"
+                "# Tune the following before apply:\n"
+                "# - genie_space_configs (titles, instructions, sample questions, SQL)\n"
+                "# Then run: make apply-genie ENV=...\n"
+                "# ============================================================================\n\n"
+            )
+        else:
+            hcl_header = (
+                "# ============================================================================\n"
+                "# GENERATED ABAC CONFIG (FIRST DRAFT)\n"
+                "# ============================================================================\n"
+                "# NOTE: Authentication comes from auth.auto.tfvars, environment from env.auto.tfvars.\n"
+                "# Tune the following before apply:\n"
+                "# - groups (business roles)\n"
+                "# - tag_assignments (what data is considered sensitive)\n"
+                "# - fgac_policies (who sees what, and how)\n"
+                "# Then validate before promoting into shared account + workspace config:\n"
+                "#   python validate_abac.py generated/abac.auto.tfvars generated/masking_functions.sql\n"
+                "# ============================================================================\n\n"
+            )
 
         hcl_block = sanitize_tfvars_hcl(hcl_block)
+
+        # ── Mode-based output filtering ───────────────────────────────────────
+        if args.mode == "governance":
+            # Strip genie_space_configs — BU teams manage Genie content independently.
+            hcl_block = remove_hcl_top_level_block(hcl_block, "genie_space_configs")
+            print("  [governance mode] Stripped genie_space_configs from output")
+        elif args.mode == "genie":
+            # Strip all ABAC sections — governance team manages them centrally.
+            for key in ("groups", "tag_policies", "group_members"):
+                hcl_block = remove_hcl_top_level_block(hcl_block, key)
+            for key in ("tag_assignments", "fgac_policies"):
+                hcl_block = remove_hcl_top_level_list(hcl_block, key)
+            # Remove any LLM-generated comment placeholders for the omitted sections
+            # (e.g. "# tag_assignments = [] — managed centrally").  The LLM sometimes
+            # acknowledges suppressed sections via commented-out examples despite the
+            # prompt instructions.
+            _abac_comment_re = re.compile(
+                r"^#[^\n]*(tag_assignments|fgac_policies|tag_policies|group_members)[^\n]*\n",
+                re.MULTILINE,
+            )
+            hcl_block = _abac_comment_re.sub("", hcl_block)
+            print("  [genie mode] Stripped ABAC sections from output (groups, tag_policies, tag_assignments, fgac_policies)")
 
         # ── Inject API-parsed genie_space_configs for existing spaces ─────────
         # The LLM generates genie_space_configs from DDL, but for spaces with a
@@ -1637,13 +3310,51 @@ Before you apply, tune for your business roles, security requirements, and Genie
         tfvars_path.write_text(hcl_header + hcl_block + "\n")
         print(f"  abac.auto.tfvars written to: {tfvars_path}")
 
+        fix_hcl_syntax(tfvars_path)
+
+        n_normalized = autofix_ambiguous_tag_values(tfvars_path)
+        if n_normalized:
+            print(f"  Auto-fixed: normalized {n_normalized} ambiguous tag_assignment value(s)")
+
+        # Run autofix_invalid_tag_values BEFORE autofix_tag_policies so that
+        # LLM typos (e.g. "masked_card" when the policy defines "masked_card_last4")
+        # are removed rather than being promoted into the policy's allowed-values list
+        # by the subsequent autofix_tag_policies call.
+        n_bad_vals = autofix_invalid_tag_values(tfvars_path)
+        if n_bad_vals:
+            print(f"  Auto-fixed: removed {n_bad_vals} tag_assignment(s) with invalid tag_value(s)")
+
+        # autofix_tag_policies adds values that are genuinely used in assignments
+        # but were accidentally omitted from the policy definition.  Running it
+        # after autofix_invalid_tag_values ensures it only promotes real values,
+        # not LLM typos that were already stripped above.
         n_fixed = autofix_tag_policies(tfvars_path)
         if n_fixed:
             print(f"  Auto-fixed {n_fixed} missing tag_policy value(s)")
 
+        n_undef = autofix_undefined_tag_refs(tfvars_path)
+        if n_undef:
+            print(f"  Auto-fixed: removed {n_undef} item(s) referencing undefined tag_key(s)")
+
+        n_repaired = autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
+        if n_repaired:
+            print(f"  Auto-fixed: added {n_repaired} fgac_policy/ies for uncovered sensitive tags")
+
         n_dropped = autofix_fgac_policy_count(tfvars_path)
         if n_dropped:
             print(f"  Auto-fixed: dropped {n_dropped} fgac_policy/ies exceeding per-catalog limit ({_FGAC_PER_CATALOG_LIMIT})")
+
+        n_fields = autofix_genie_config_fields(tfvars_path)
+        if n_fields:
+            print(f"  Auto-fixed: added {n_fields} missing required field(s) in genie_space_configs")
+
+        n_fn_refs = autofix_invalid_function_refs(tfvars_path, sql_path if sql_block else None)
+        if n_fn_refs:
+            print(f"  Auto-fixed: corrected {n_fn_refs} invalid function reference(s) in fgac_policies")
+
+        n_cat_mismatch = autofix_function_category_mismatch(tfvars_path, sql_path if sql_block else None)
+        if n_cat_mismatch:
+            print(f"  Auto-fixed: corrected {n_cat_mismatch} function/category mismatch(es) in fgac_policies")
 
         # ── Per-space mode: bootstrap per-space dir, then merge into assembled ──
         if target_space_cfg is not None and space_key:
@@ -1654,6 +3365,47 @@ Before you apply, tune for your business roles, security requirements, and Genie
             subprocess.check_call(
                 [sys.executable, str(merge_script), str(assembled_dir), space_key]
             )
+            # Safety-net autofix on the assembled abac in case the merge
+            # introduced any cross-space tag_key inconsistencies.
+            assembled_abac_path = assembled_dir / "abac.auto.tfvars"
+            if assembled_abac_path.exists():
+                assembled_sql_path = assembled_dir / "masking_functions.sql"
+                n_normalized_assembled = autofix_ambiguous_tag_values(assembled_abac_path)
+                if n_normalized_assembled:
+                    print(f"  Auto-fixed assembled abac: normalized {n_normalized_assembled} ambiguous tag_assignment value(s)")
+                n_bad_vals_assembled = autofix_invalid_tag_values(assembled_abac_path)
+                if n_bad_vals_assembled:
+                    print(f"  Auto-fixed assembled abac: removed {n_bad_vals_assembled} tag_assignment(s) with invalid tag_value(s)")
+                n_fixed_assembled = autofix_tag_policies(assembled_abac_path)
+                if n_fixed_assembled:
+                    print(f"  Auto-fixed assembled abac: added {n_fixed_assembled} missing tag_policy value(s)")
+                n_undef_assembled = autofix_undefined_tag_refs(assembled_abac_path)
+                if n_undef_assembled:
+                    print(f"  Auto-fixed assembled abac: removed {n_undef_assembled} item(s) referencing undefined tag_key(s)")
+                n_repaired_assembled = autofix_missing_fgac_policies(
+                    assembled_abac_path,
+                    assembled_sql_path if assembled_sql_path.exists() else None,
+                )
+                if n_repaired_assembled:
+                    print(f"  Auto-fixed assembled abac: added {n_repaired_assembled} fgac_policy/ies for uncovered sensitive tags")
+                n_dropped_assembled = autofix_fgac_policy_count(assembled_abac_path)
+                if n_dropped_assembled:
+                    print(f"  Auto-fixed assembled abac: dropped {n_dropped_assembled} fgac_policy/ies exceeding per-catalog limit ({_FGAC_PER_CATALOG_LIMIT})")
+                n_fields_assembled = autofix_genie_config_fields(assembled_abac_path)
+                if n_fields_assembled:
+                    print(f"  Auto-fixed assembled abac: added {n_fields_assembled} missing required field(s) in genie_space_configs")
+                n_fn_refs_assembled = autofix_invalid_function_refs(
+                    assembled_abac_path,
+                    assembled_sql_path if assembled_sql_path.exists() else None,
+                )
+                if n_fn_refs_assembled:
+                    print(f"  Auto-fixed assembled abac: corrected {n_fn_refs_assembled} invalid function reference(s)")
+                n_cat_mismatch_assembled = autofix_function_category_mismatch(
+                    assembled_abac_path,
+                    assembled_sql_path if assembled_sql_path.exists() else None,
+                )
+                if n_cat_mismatch_assembled:
+                    print(f"  Auto-fixed assembled abac: corrected {n_cat_mismatch_assembled} function/category mismatch(es)")
 
         # ── Full generation: bootstrap per-space dirs from the assembled output ─
         elif target_space_cfg is None and not args.space:
@@ -1663,13 +3415,17 @@ Before you apply, tune for your business roles, security requirements, and Genie
     # not the per-space subdirectory.
     validation_dir = out_dir.parent.parent if (target_space_cfg is not None and space_key) else out_dir
 
-    if sql_block and hcl_block and not args.skip_validation:
+    # Genie mode: skip validation — the output intentionally has no groups/ABAC sections
+    # and validate_abac.py would incorrectly report "groups is missing".
+    # Governance mode + full mode: validate when both HCL and SQL blocks are present.
+    _can_validate = hcl_block and sql_block and args.mode != "genie"
+    if _can_validate and not args.skip_validation:
         passed = run_validation(validation_dir)
         if not passed:
             print("\n  Validation found errors. Review the output above and fix before running terraform apply.")
             sys.exit(1)
 
-        if args.promote and passed:
+        if args.promote and passed:  # type: ignore[possibly-unbound]
             if WORK_DIR.name in {"account", "data_access"}:
                 print("\n  [SKIP] --promote requires a workspace env directory (e.g. envs/dev).")
             elif target_space_cfg is not None and space_key:
@@ -1695,13 +3451,14 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 print(
                     "\n  Promoted into shared account + env-scoped data_access + workspace configs."
                 )
-    elif not args.skip_validation and (not sql_block or not hcl_block):
-        print("\n  [SKIP] Validation skipped — could not extract both code blocks.")
+    elif not hcl_block or (not sql_block and args.mode == "full"):
+        print("\n  [ERROR] Could not extract both code blocks from LLM response.")
         print(f"  Review {response_path} and manually extract the files.")
+        sys.exit(1)
 
     print("\n" + "=" * 60)
     print("  Done!")
-    if sql_block and hcl_block:
+    if hcl_block:
         if args.promote:
             env_name = Path.cwd().name
             env_suffix = f" ENV={env_name}" if env_name != "dev" else ""
@@ -1725,10 +3482,16 @@ Before you apply, tune for your business roles, security requirements, and Genie
             print(f"    1. Review the tuning checklist:")
             print(f"       {out_dir.resolve()}/TUNING.md")
             print(f"    2. Review and tune generated files:")
-            print(f"       {out_dir.resolve()}/masking_functions.sql")
+            if sql_block:
+                print(f"       {out_dir.resolve()}/masking_functions.sql")
             print(f"       {out_dir.resolve()}/abac.auto.tfvars")
             print(f"    3. make validate-generated{env_suffix}   (check your changes anytime)")
-            print(f"    4. make apply{env_suffix}   (validates, splits shared account/workspace config, runs terraform apply)")
+            if args.mode == "governance":
+                print(f"    4. make apply-governance{env_suffix}   (applies account + data_access layers only)")
+            elif args.mode == "genie":
+                print(f"    4. make apply-genie{env_suffix}   (applies workspace layer only)")
+            else:
+                print(f"    4. make apply{env_suffix}   (validates, splits shared account/workspace config, runs terraform apply)")
     print("=" * 60)
 
 

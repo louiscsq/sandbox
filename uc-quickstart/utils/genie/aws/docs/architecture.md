@@ -12,6 +12,10 @@ The quickstart edits files in `envs/<env>/`, while Terraform itself runs from fi
 | Data access | `envs/<env>/data_access/` | Env-scoped tag assignments, masking functions, FGAC policies, catalog grants | Account tag policy definitions, workspace entitlements, Genie lifecycle |
 | Workspace | `envs/<env>/` | Workspace assignment, entitlements, optional warehouse, optional Genie Space and ACLs | Account groups, tag policies, FGAC policies |
 
+### Decentralized operating mode
+
+The layers are designed so that different teams can own different layers independently. In decentralized deployments, a central Data Governance team owns the account + data_access layers while BU teams own only their workspace layers. See [decentralized.md](decentralized.md) for the full guide and CI/CD integration patterns.
+
 ## Directory Contract
 
 - `envs/account/` is the only shared layer across all environments
@@ -78,18 +82,21 @@ If you already use the Databricks CLI, the same service principal details are of
 This file is checked in and holds environment-level settings:
 
 ```hcl
-# Only the catalog name changes between dev, staging, and prod.
-# Schema and table names are assumed stable.
-uc_catalog = "dev_catalog"
+genie_spaces = [
+  {
+    name      = "Finance Analytics"
+    uc_tables = [
+      "dev_catalog.finance.customers",
+      "dev_catalog.finance.transactions",
+      "dev_catalog.finance.*",   # wildcard expands all tables in the schema
+    ]
+    # genie_space_id = ""   # omit or leave empty to create; set to attach to existing
+    # sql_warehouse_id = "" # optional per-space override
+  },
+]
 
-# Schema-relative references — no catalog prefix.
-uc_tables = ["sales.customers", "sales.orders", "finance.*"]
-
-sql_warehouse_id = ""
-genie_space_id   = ""
+sql_warehouse_id = ""   # shared fallback; empty = auto-create serverless
 ```
-
-Migration note for existing users: the old single `uc_tables = ["catalog.schema.table"]` format is retired. Split existing entries into `uc_catalog = "catalog"` and schema-relative `uc_tables = ["schema.table"]`.
 
 Only `envs/account/env.auto.tfvars` should include `manage_groups = true`. Workspace and `data_access` env files should omit that field and rely on their built-in lookup-only defaults.
 
@@ -106,13 +113,12 @@ Tune the generated draft before applying. See `generated/TUNING.md` for guidance
 
 ## Genie Space Behavior
 
-Managed automatically based on `genie_space_id` in `env.auto.tfvars`:
+Each entry in `genie_spaces` behaves based on whether `genie_space_id` is set:
 
-| `genie_space_id` | `uc_catalog` + `uc_tables` | What happens on `make apply` |
-| ---------------- | -------------------------- | ---------------------------- |
-| Empty | Both non-empty | Auto-creates a Genie Space from the resolved tables, sets `CAN_RUN` ACLs, trashes on `make destroy` |
-| Set | Any | Applies `CAN_RUN` ACLs to the existing space |
-| Empty | Either empty | No Genie Space action |
+| `genie_space_id` in entry | What happens on `make apply` |
+| ------------------------- | ---------------------------- |
+| Empty (default) | Creates a new Genie Space, configures it fully (title, instructions, benchmarks, ACLs), trashes it on `make destroy` |
+| Set | Attaches to the existing space — never creates or deletes it; applies ACLs and pushes config changes back to the API |
 
 When `make generate` creates the ABAC config, it also generates Genie Space config in `abac.auto.tfvars`:
 
