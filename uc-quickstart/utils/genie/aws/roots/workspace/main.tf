@@ -55,8 +55,11 @@ locals {
 
   legacy_space_name = var.genie_space_title != "" ? var.genie_space_title : "Genie Space"
 
+  # The legacy single-space path is only activated when genie_space_title is
+  # explicitly set (non-empty).  Having uc_tables in env.auto.tfvars for ABAC
+  # policy generation must NOT cause a Genie Space to be created.
   effective_spaces = length(var.genie_spaces) > 0 ? var.genie_spaces : (
-    length(var.uc_tables) > 0 || var.genie_space_id != "" ? [{
+    var.genie_space_title != "" || var.genie_space_id != "" ? [{
       name             = local.legacy_space_name
       genie_space_id   = var.genie_space_id
       sql_warehouse_id = var.sql_warehouse_id

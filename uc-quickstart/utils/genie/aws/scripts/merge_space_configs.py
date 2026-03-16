@@ -235,14 +235,61 @@ def extract_function_names(sql_text: str) -> set[str]:
 
 
 def split_into_function_blocks(sql_text: str) -> list[str]:
-    """Split a SQL file into individual CREATE FUNCTION blocks."""
-    # Split on CREATE [OR REPLACE] [TABLE] FUNCTION boundaries
+    """Split a SQL file into individual CREATE FUNCTION blocks, each with its
+    USE CATALOG / USE SCHEMA context prepended.
+
+    The deploy_masking_functions.py script uses USE CATALOG/SCHEMA directives
+    to determine the execution context for each CREATE statement.  Without the
+    context header, appended functions would be deployed under the last catalog
+    active in the assembled file (usually dev_fin), not their own catalog.
+    """
+    # Track current catalog/schema context as we scan
+    catalog: str = ""
+    schema: str = ""
+    blocks: list[str] = []
+
+    # Split on CREATE boundaries (positive lookahead keeps the keyword)
     parts = re.split(
         r"(?=CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE\s+)?FUNCTION\b)",
         sql_text,
         flags=re.IGNORECASE,
     )
-    return [p.strip() for p in parts if p.strip()]
+    for part in parts:
+        stripped = part.strip()
+        if not stripped:
+            continue
+
+        # Update current context from USE directives in this segment.
+        # Strip any trailing semicolon so the catalog/schema name is clean.
+        for m in re.finditer(r"USE\s+CATALOG\s+(\S+)", stripped, re.IGNORECASE):
+            catalog = m.group(1).rstrip(";")
+        for m in re.finditer(r"USE\s+SCHEMA\s+(\S+)", stripped, re.IGNORECASE):
+            schema = m.group(1).rstrip(";")
+
+        # Only keep segments that contain a CREATE FUNCTION statement
+        if not re.search(r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE\s+)?FUNCTION\b",
+                         stripped, re.IGNORECASE):
+            continue
+
+        # Prepend the context so the function is deployed to the right catalog/schema
+        ctx_lines: list[str] = []
+        if catalog:
+            ctx_lines.append(f"USE CATALOG {catalog};")
+        if schema:
+            ctx_lines.append(f"USE SCHEMA {schema};")
+        header = "\n".join(ctx_lines)
+
+        # Strip any trailing USE directives from the function body (they're
+        # already captured above and will be prepended as the context header)
+        body = re.sub(r"^\s*USE\s+(?:CATALOG|SCHEMA)\s+\S+\s*;\s*", "",
+                      stripped, flags=re.IGNORECASE | re.MULTILINE)
+
+        if header:
+            blocks.append(f"{header}\n\n{body.strip()}")
+        else:
+            blocks.append(body.strip())
+
+    return blocks
 
 
 # ---------------------------------------------------------------------------

@@ -37,15 +37,22 @@ Scenarios
                    ABAC governance. Finally promotes to prod. Tests playbook.md §3
                    "Attaching to an existing Genie Space" + §3a promotion.
 
-  decentralized    Central Data Governance team + independent BU Genie team.
-                   Governance env runs `make generate MODE=governance` (ABAC only,
-                   no genie_space_configs) + `make apply-governance` (account +
-                   data_access only — no Genie spaces).  BU env runs
-                   `make generate MODE=genie` (genie_space_configs only, no ABAC) +
-                   `make apply-genie` (workspace layer only).  Asserts cross-layer
-                   state isolation: governance env has data_access state but no
-                   .genie_space_id_*; BU env has .genie_space_id_* but no
-                   data_access state. Tests playbook.md §7 and docs/decentralized.md.
+  decentralized    Central Data Governance team + independent BU Genie teams.
+                   Phase 1: governance env applies ABAC (MODE=governance + apply-governance).
+                   Phase 2: bu_fin env creates Finance Analytics (MODE=genie + apply-genie).
+                   Phase 3: bu_clin (second BU) added; governance state verified unchanged.
+                   Phase 4: bu_fin → bu_fin_prod promoted via make promote + make apply-genie.
+                   Asserts cross-layer state isolation throughout. Tests playbook.md §7.
+
+  abac-only        ABAC governance only — no Genie Space (playbook.md §2).
+                   Phase 1: uc_tables only in env.auto.tfvars, plain make generate + make apply.
+                   Phase 2: §2 → §4 upgrade: add genie_spaces, make generate SPACE=, make apply.
+                   Asserts governance preserved when Genie Space is added later.
+
+  multi-space-import  Import two UI-configured Genie Spaces in one make generate call
+                   (playbook.md §3 multi-space import). Creates two spaces via API,
+                   imports both via genie_space_id entries, asserts both genie_space_configs
+                   present, no new spaces created by Terraform.
 
   all              Run all scenarios sequentially (default when no --scenario given).
 
@@ -80,6 +87,8 @@ Makefile targets (added by this PR)
   make test-multi-env
   make test-attach-promote
   make test-decentralized
+  make test-abac-only
+  make test-multi-space-import
   make test-all
 """
 
@@ -188,6 +197,15 @@ genie_spaces = [
       "{DEV_CLIN_CAT}.clinical.encounters",
     ]
   }},
+]
+"""
+
+# uc_tables only — no genie_spaces block (used by the abac-only scenario)
+TABLES_FINANCE_ONLY_HCL = f"""\
+uc_tables = [
+  "{DEV_FIN_CAT}.finance.customers",
+  "{DEV_FIN_CAT}.finance.transactions",
+  "{DEV_FIN_CAT}.finance.credit_cards",
 ]
 """
 
@@ -2018,7 +2036,7 @@ def scenario_decentralized(
     keep_data: bool = False,
     fresh_env: bool = False,
 ) -> None:
-    """Decentralized governance: central ABAC team + independent BU Genie team.
+    """Decentralized governance: central ABAC team + independent BU Genie teams.
 
     Phase 1 — Governance team:
       Creates a 'governance' env that governs both dev_fin + dev_clinical catalogs.
@@ -2034,23 +2052,35 @@ def scenario_decentralized(
       Runs `make apply-genie` — applies workspace only; Finance Analytics Genie Space
       IS created (.genie_space_id_finance_analytics must appear).
 
-    Phase 3 — State isolation assertions:
-      'governance' env: data_access/terraform.tfstate exists, no .genie_space_id_* file.
-      'bu_fin' env: .genie_space_id_* file exists, no data_access/terraform.tfstate.
+    Phase 3 — Adding a second BU (isolation check):
+      Creates a 'bu_clin' env for a second BU team with Clinical Analytics.
+      Runs `make generate MODE=genie` + `make apply-genie`.
+      Asserts that the governance team's data_access/terraform.tfstate is byte-for-byte
+      unchanged after the second BU is added (proving independence).
+      Tests playbook.md §7 "Adding a second BU".
+
+    Phase 4 — BU Finance team promote to prod:
+      Runs `make promote SOURCE_ENV=bu_fin DEST_ENV=bu_fin_prod DEST_CATALOG_MAP=dev_fin=prod_fin`.
+      Then runs `make apply-genie ENV=bu_fin_prod` (NOT make apply) — applies workspace only.
+      Asserts bu_fin_prod has .genie_space_id_* but no data_access/terraform.tfstate.
+      Asserts governance state is unmodified throughout.
+      Tests the BU-team prod-promotion pattern from docs/decentralized.md.
 
     Tests: playbook.md §7 "Decentralized governance" and docs/decentralized.md.
     """
-    _banner("Scenario: decentralized — Central governance team + BU Genie team")
-    gov_env = "governance"
-    bu_env  = "bu_fin"
+    _banner("Scenario: decentralized — Central governance team + BU Genie teams")
+    gov_env     = "governance"
+    bu_env      = "bu_fin"
+    bu_clin_env = "bu_clin"
+    bu_prod_env = "bu_fin_prod"
 
     _ensure_packages()
 
     # ── Phase 1: Governance team — data setup ────────────────────────────────
-    _preamble_cleanup(gov_env, bu_env, fresh_env=fresh_env)
+    _preamble_cleanup(gov_env, bu_env, bu_clin_env, bu_prod_env, fresh_env=fresh_env)
 
-    _step("Phase 1 — Setting up dev_fin + dev_clinical test catalogs")
-    _setup_data(auth_file, warehouse_id=warehouse_id)
+    _step("Phase 1 — Setting up dev_fin + dev_clinical + prod_fin test catalogs")
+    _setup_data(auth_file, "--prod", warehouse_id=warehouse_id)
 
     resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
     _make("setup", f"ENV={gov_env}")
@@ -2156,9 +2186,105 @@ uc_tables = [
         )
     print(f"  {_green('PASS')}  No data_access/terraform.tfstate in '{bu_env}' env — workspace layer only")
 
+    # ── Phase 3: Second BU — isolation check ─────────────────────────────────
+    # Snapshot governance data_access state before Phase 3 to verify it does not change.
+    gov_da_state_snapshot = da_state.read_text()
+
+    _step("Phase 3 — Setting up second BU team (Clinical Analytics)")
+    _make("setup", f"ENV={bu_clin_env}")
+    _write_env_tfvars(bu_clin_env, SPACES_CLINICAL_ONLY, resolved_wh)
+    _copy_auth("dev", bu_clin_env)
+
+    _step("Phase 3 — Generating Genie config for second BU (genie MODE)")
+    _make("generate", f"ENV={bu_clin_env}", "MODE=genie", retries=2)
+
+    bu_clin_gen = ENVS_DIR / bu_clin_env / "generated" / "abac.auto.tfvars"
+    _assert_file_exists(bu_clin_gen, f"{bu_clin_env}/generated/abac.auto.tfvars created")
+    _assert_contains(bu_clin_gen, "Clinical Analytics",
+                     "Clinical Analytics genie_space_configs in second BU output")
+    for section in ("tag_assignments", "fgac_policies"):
+        _assert_not_declared_hcl(bu_clin_gen, section,
+                                 f"'{section}' not declared in second BU genie output")
+
+    _step("Phase 3 — Applying second BU workspace layer")
+    _make("apply-genie", f"ENV={bu_clin_env}", retries=3, retry_delay_seconds=120)
+
+    _step("Asserting second BU env: .genie_space_id_* created, governance state unchanged")
+    bu_clin_env_dir = ENVS_DIR / bu_clin_env
+    id_files_clin = list(bu_clin_env_dir.glob(".genie_space_id_*"))
+    if not id_files_clin:
+        raise AssertionError(
+            f"apply-genie did not create a .genie_space_id_* file in '{bu_clin_env}' env. "
+            "The Clinical Analytics Genie Space should have been created."
+        )
+    print(f"  {_green('PASS')}  .genie_space_id_* file present in '{bu_clin_env}' env: "
+          + ", ".join(f.name for f in id_files_clin))
+
+    gov_da_state_after_p3 = da_state.read_text()
+    if gov_da_state_snapshot != gov_da_state_after_p3:
+        raise AssertionError(
+            f"governance/data_access/terraform.tfstate was modified when '{bu_clin_env}' BU was added. "
+            "The governance team's state should be completely unaffected by adding a second BU."
+        )
+    print(f"  {_green('PASS')}  governance data_access state byte-for-byte unchanged after second BU")
+
+    # ── Phase 4: BU Finance team promote to prod ─────────────────────────────
+    _step(f"Phase 4 — BU Finance team promoting {bu_env} → {bu_prod_env}")
+    _make(
+        "promote",
+        f"SOURCE_ENV={bu_env}",
+        f"DEST_ENV={bu_prod_env}",
+        f"DEST_CATALOG_MAP={DEV_FIN_CAT}={PROD_FIN_CAT}",
+    )
+
+    _assert_file_exists(
+        ENVS_DIR / bu_prod_env / "env.auto.tfvars",
+        f"{bu_prod_env} env.auto.tfvars written by promote",
+    )
+    _assert_contains(
+        ENVS_DIR / bu_prod_env / "generated" / "abac.auto.tfvars",
+        PROD_FIN_CAT,
+        f"{PROD_FIN_CAT} catalog in promoted prod config",
+    )
+
+    _copy_auth("dev", bu_prod_env)
+
+    _step("Phase 4 — Applying prod workspace layer (make apply-genie, not make apply)")
+    _make("apply-genie", f"ENV={bu_prod_env}", retries=3, retry_delay_seconds=120)
+
+    _step("Asserting prod BU env: .genie_space_id_* created, no data_access state")
+    bu_prod_env_dir = ENVS_DIR / bu_prod_env
+    id_files_prod = list(bu_prod_env_dir.glob(".genie_space_id_*"))
+    if not id_files_prod:
+        raise AssertionError(
+            f"apply-genie did not create a .genie_space_id_* file in '{bu_prod_env}' env. "
+            "Finance Analytics should have been created in the prod BU env."
+        )
+    print(f"  {_green('PASS')}  .genie_space_id_* file present in '{bu_prod_env}' env: "
+          + ", ".join(f.name for f in id_files_prod))
+
+    bu_prod_da_state = bu_prod_env_dir / "data_access" / "terraform.tfstate"
+    if bu_prod_da_state.exists():
+        raise AssertionError(
+            f"apply-genie wrote a data_access/terraform.tfstate in '{bu_prod_env}' env — "
+            "BU prod promote should apply only the workspace layer."
+        )
+    print(f"  {_green('PASS')}  No data_access/terraform.tfstate in '{bu_prod_env}' — workspace layer only")
+
+    gov_da_state_after_p4 = da_state.read_text()
+    if gov_da_state_snapshot != gov_da_state_after_p4:
+        raise AssertionError(
+            "governance/data_access/terraform.tfstate was modified during BU prod promote. "
+            "The governance team's state should be completely unaffected."
+        )
+    print(f"  {_green('PASS')}  governance data_access state unchanged after BU prod promote")
+
     # ── teardown ─────────────────────────────────────────────────────────────
     if not keep_data:
-        _teardown_data("--teardown", auth_file=auth_file, warehouse_id=resolved_wh)
+        _teardown_data("--teardown", "--teardown-prod", auth_file=auth_file,
+                       warehouse_id=resolved_wh)
+        _try_destroy(bu_prod_env)
+        _try_destroy(bu_clin_env)
         _try_destroy(bu_env)
         _try_destroy(gov_env)
         _try_destroy_account()
@@ -2167,18 +2293,247 @@ uc_tables = [
 
 
 # ---------------------------------------------------------------------------
+# Scenario: abac-only — ABAC governance without Genie Space (+ upgrade path)
+# ---------------------------------------------------------------------------
+
+def scenario_abac_only(
+    auth_file: Path,
+    warehouse_id: str,
+    keep_data: bool,
+    fresh_env: bool = False,
+) -> None:
+    """
+    Phase 1 — ABAC-only deploy (playbook.md §2):
+      Configure env with uc_tables only (no genie_spaces block).
+      Run plain `make generate` (no MODE= flag) + `make apply`.
+      Assert: no genie_space_configs in generated output, masking_functions.sql
+      generated, no .genie_space_id_* file, data_access/terraform.tfstate exists.
+
+    Phase 2 — §2 → §4 upgrade path:
+      Add Finance Analytics to genie_spaces and run `make generate SPACE="Finance Analytics"`.
+      Then `make apply`. Assert Genie Space created, existing governance preserved
+      (data_access/terraform.tfstate still exists, column tags and masks still applied).
+
+    Tests: playbook.md §2 "ABAC governance only" and the §2 → §4 upgrade path.
+    """
+    _banner("Scenario: abac-only — ABAC governance without Genie Space (+ upgrade to Genie)")
+    env = "dev"
+
+    _preamble_cleanup(env, fresh_env=fresh_env)
+
+    _step("Phase 1 — Setting up dev_fin test catalog")
+    _setup_data(auth_file, warehouse_id=warehouse_id)
+
+    resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
+
+    # Phase 1: uc_tables only, no genie_spaces
+    _step("Phase 1 — Configuring env with uc_tables only (no genie_spaces)")
+    _make("setup", f"ENV={env}")
+    wh_line = f'sql_warehouse_id = "{resolved_wh}"' if resolved_wh else 'sql_warehouse_id = ""'
+    env_dir = ENVS_DIR / env
+    (env_dir / "env.auto.tfvars").write_text(TABLES_FINANCE_ONLY_HCL + wh_line + "\n")
+
+    _step("Phase 1 — Generating ABAC config (plain make generate, no genie_spaces)")
+    _make("generate", f"ENV={env}", retries=2)
+
+    gen_dir = env_dir / "generated"
+    _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated")
+    _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated")
+    _assert_not_declared_hcl(gen_dir / "abac.auto.tfvars", "genie_space_configs",
+                             "genie_space_configs absent (no genie_spaces in env config)")
+
+    _step("Phase 1 — Applying (all three layers)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+
+    _step("Asserting Phase 1: no Genie Space created, data_access state exists")
+    id_files = list(env_dir.glob(".genie_space_id_*"))
+    legacy   = env_dir / ".genie_space_id"
+    if id_files or legacy.exists():
+        raise AssertionError(
+            "make apply created a Genie Space in ABAC-only mode — expected none. "
+            f"Files: {[f.name for f in id_files]}"
+        )
+    print(f"  {_green('PASS')}  No .genie_space_id_* file — Genie Space correctly not created")
+
+    da_state = env_dir / "data_access" / "terraform.tfstate"
+    if not da_state.exists():
+        raise AssertionError(
+            "data_access/terraform.tfstate not found after ABAC-only apply. "
+            "Expected all three layers to be applied."
+        )
+    print(f"  {_green('PASS')}  data_access/terraform.tfstate exists — governance deployed")
+
+    _step("Verifying ABAC governance applied to dev_fin tables")
+    _verify_data(auth_file, dev=True, warehouse_id=resolved_wh)
+
+    # ── Phase 2: §2 → §4 upgrade path ────────────────────────────────────────
+    _step("Phase 2 — Adding Finance Analytics to env.auto.tfvars (ABAC-only → Genie upgrade)")
+    _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
+
+    _step("Phase 2 — Per-space generate for Finance Analytics")
+    _make("generate", f"ENV={env}", "SPACE=Finance Analytics", retries=2)
+
+    _assert_contains(gen_dir / "abac.auto.tfvars", "Finance Analytics",
+                     "Finance Analytics genie_space_configs present after upgrade")
+
+    _step("Phase 2 — Applying (Genie Space created on top of existing governance)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+
+    _step("Asserting Phase 2: Genie Space created, governance preserved")
+    _assert_genie_space_id_file(env, "Finance Analytics")
+
+    if not da_state.exists():
+        raise AssertionError(
+            "data_access/terraform.tfstate was removed during Genie Space upgrade — "
+            "existing governance should be preserved."
+        )
+    print(f"  {_green('PASS')}  data_access/terraform.tfstate still exists — governance preserved")
+
+    _step("Verifying ABAC governance still applied after Genie Space added")
+    _verify_data(auth_file, dev=True, warehouse_id=resolved_wh)
+
+    # ── teardown ─────────────────────────────────────────────────────────────
+    if not keep_data:
+        _teardown_data("--teardown", auth_file=auth_file, warehouse_id=resolved_wh)
+        _try_destroy(env)
+        _try_destroy_account()
+
+    print(f"\n  {_green(_bold('PASSED'))}  abac-only")
+
+
+# ---------------------------------------------------------------------------
+# Scenario: multi-space-import — Import two UI-created Genie Spaces at once
+# ---------------------------------------------------------------------------
+
+def scenario_multi_space_import(
+    auth_file: Path,
+    warehouse_id: str,
+    keep_data: bool,
+    fresh_env: bool = False,
+) -> None:
+    """
+    Import two existing Genie Spaces in one make generate call (playbook.md §3 multi-space).
+
+    Creates two spaces via the Genie REST API (simulating UI-configured spaces),
+    then configures genie_spaces with two genie_space_id entries. Asserts both
+    configs appear in the generated output and Terraform does not create new
+    spaces on apply (both are attached, not created).
+
+    Tests: playbook.md §3 "Multi-space import" section.
+    """
+    _banner("Scenario: multi-space-import — Import two UI-created Genie Spaces")
+    env = "dev"
+
+    _ensure_packages()
+    _preamble_cleanup(env, fresh_env=fresh_env)
+
+    _step("Setting up dev_fin and dev_clinical test catalogs")
+    _setup_data(auth_file, warehouse_id=warehouse_id)
+
+    resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
+
+    fin_tables = [
+        f"{DEV_FIN_CAT}.finance.customers",
+        f"{DEV_FIN_CAT}.finance.transactions",
+        f"{DEV_FIN_CAT}.finance.credit_cards",
+    ]
+    clin_tables = [
+        f"{DEV_CLIN_CAT}.clinical.patients",
+        f"{DEV_CLIN_CAT}.clinical.encounters",
+    ]
+
+    _step("Creating Finance Analytics Genie Space via API (simulating UI configuration)")
+    fin_space_id = _create_genie_space_via_api(
+        auth_file, title="Finance Analytics", tables=fin_tables, warehouse_id=resolved_wh,
+    )
+
+    _step("Creating Clinical Analytics Genie Space via API (simulating UI configuration)")
+    clin_space_id = _create_genie_space_via_api(
+        auth_file, title="Clinical Analytics", tables=clin_tables, warehouse_id=resolved_wh,
+    )
+
+    _step("Configuring env with two genie_space_id entries (multi-space import)")
+    _make("setup", f"ENV={env}")
+
+    two_space_import_hcl = f"""\
+genie_spaces = [
+  {{
+    name           = "Finance Analytics"
+    genie_space_id = "{fin_space_id}"
+    uc_tables = [
+      "{DEV_FIN_CAT}.finance.customers",
+      "{DEV_FIN_CAT}.finance.transactions",
+      "{DEV_FIN_CAT}.finance.credit_cards",
+    ]
+  }},
+  {{
+    name           = "Clinical Analytics"
+    genie_space_id = "{clin_space_id}"
+    uc_tables = [
+      "{DEV_CLIN_CAT}.clinical.patients",
+      "{DEV_CLIN_CAT}.clinical.encounters",
+    ]
+  }},
+]
+"""
+    _write_env_tfvars(env, two_space_import_hcl, resolved_wh)
+
+    _step("Running make generate — importing both spaces in one call")
+    _make("generate", f"ENV={env}", retries=2)
+
+    gen_dir = ENVS_DIR / env / "generated"
+    _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated")
+    _assert_contains(gen_dir / "abac.auto.tfvars", "Finance Analytics",
+                     "Finance Analytics genie_space_configs present")
+    _assert_contains(gen_dir / "abac.auto.tfvars", "Clinical Analytics",
+                     "Clinical Analytics genie_space_configs present")
+    _assert_contains(gen_dir / "abac.auto.tfvars", DEV_FIN_CAT,
+                     f"{DEV_FIN_CAT} catalog referenced in generated policies")
+    _assert_contains(gen_dir / "abac.auto.tfvars", DEV_CLIN_CAT,
+                     f"{DEV_CLIN_CAT} catalog referenced in generated policies")
+
+    _step("Applying governance (both spaces attached — Terraform must not create new spaces)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+
+    _step("Asserting no .genie_space_id_* files — both spaces attached, not created")
+    id_files = list((ENVS_DIR / env).glob(".genie_space_id_*"))
+    legacy   = ENVS_DIR / env / ".genie_space_id"
+    if id_files or legacy.exists():
+        raise AssertionError(
+            "Terraform created new Genie Spaces in multi-space import mode — expected none. "
+            f"Files: {[f.name for f in id_files]}"
+        )
+    print(f"  {_green('PASS')}  No .genie_space_id_* files — both spaces correctly attached")
+
+    _step("Verifying ABAC governance applied across both catalogs")
+    _verify_data(auth_file, dev=True, warehouse_id=resolved_wh)
+
+    # ── teardown ─────────────────────────────────────────────────────────────
+    if not keep_data:
+        _teardown_data("--teardown", auth_file=auth_file, warehouse_id=resolved_wh)
+        _try_destroy(env)
+        _try_destroy_account()
+        _delete_genie_space_via_api(auth_file, fin_space_id)
+        _delete_genie_space_via_api(auth_file, clin_space_id)
+
+    print(f"\n  {_green(_bold('PASSED'))}  multi-space-import")
+
+
+# ---------------------------------------------------------------------------
 # Scenario registry
 # ---------------------------------------------------------------------------
 
 SCENARIOS: dict[str, tuple[str, Callable]] = {
-    "quickstart":      ("Single space, single catalog (Finance/dev_fin)",                    scenario_quickstart),
-    "multi-catalog":   ("One space spanning two catalogs (Combined)",                        scenario_multi_catalog),
-    "multi-space":     ("Two spaces, separate catalogs (Finance+Clinical)",                  scenario_multi_space),
-    "per-space":       ("Incremental per-space generation (isolation test)",                 scenario_per_space),
-    "promote":         ("Multi-space dev → prod promotion",                                  scenario_promote),
-    "multi-env":       ("Two independent envs (dev Finance, bu2 Clinical)",                  scenario_multi_env),
-    "attach-promote":  ("Attach to UI-created space (API discovery) + promote",              scenario_attach_and_promote),
-    "decentralized":   ("Central governance team (MODE=governance) + BU Genie team (MODE=genie)", scenario_decentralized),
+    "quickstart":           ("Single space, single catalog (Finance/dev_fin)",                    scenario_quickstart),
+    "multi-catalog":        ("One space spanning two catalogs (Combined)",                        scenario_multi_catalog),
+    "multi-space":          ("Two spaces, separate catalogs (Finance+Clinical)",                  scenario_multi_space),
+    "per-space":            ("Incremental per-space generation (isolation test)",                 scenario_per_space),
+    "promote":              ("Multi-space dev → prod promotion",                                  scenario_promote),
+    "multi-env":            ("Two independent envs (dev Finance, bu2 Clinical)",                  scenario_multi_env),
+    "attach-promote":       ("Attach to UI-created space (API discovery) + promote",              scenario_attach_and_promote),
+    "decentralized":        ("Central governance team (MODE=governance) + BU Genie teams (MODE=genie)", scenario_decentralized),
+    "abac-only":            ("ABAC governance only (no Genie Space) + upgrade to Genie",         scenario_abac_only),
+    "multi-space-import":   ("Import two UI-created Genie Spaces in one make generate",          scenario_multi_space_import),
 }
 
 

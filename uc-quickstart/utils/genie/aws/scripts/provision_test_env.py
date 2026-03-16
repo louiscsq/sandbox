@@ -31,7 +31,6 @@ Environment file (scripts/account-admin.env)
   DATABRICKS_CLIENT_ID        = <SP application/client ID — must have Account Admin>
   DATABRICKS_CLIENT_SECRET    = <SP OAuth secret>
   DATABRICKS_AWS_REGION       = ap-southeast-2   # or your region
-  DATABRICKS_S3_BUCKET = s3://my-bucket   # S3 bucket you own
 
   # AWS credentials (needed to create/delete the UC IAM role automatically).
   # Leave blank to use the default boto3 chain: ~/.aws/credentials, AWS_PROFILE,
@@ -43,20 +42,24 @@ Storage setup (fully automated)
 --------------------------------
   The provision script creates everything needed in AWS and Databricks:
 
-  1. AWS IAM role  — a fresh role scoped to the test-run S3 prefix, with the
-                     correct UC trust policy (principal = Databricks UC service).
+  0. S3 bucket        — named genie-uc-test-<aws-account-id>.  Created on first
+                        run; reused if it already exists.  Deleted on teardown.
+  1. AWS IAM role     — a fresh role scoped to the test-run S3 prefix, with the
+                        correct UC trust policy (principal = Databricks UC service).
   2. Storage credential — registered in the new metastore via the Databricks API.
   3. External Location  — path-scoped S3 prefix for this run registered in the
                           new workspace, so catalogs can be created without a
                           metastore-level storage root.
 
-  The IAM role is deleted automatically by `teardown`.
+  The IAM role and S3 test prefix are both deleted automatically by `teardown`.
+  The bucket itself is deleted only if this script created it.
 
   You only need to provide:
-    • An existing S3 bucket you own (DATABRICKS_S3_BUCKET).
-    • AWS credentials with permission to create/delete IAM roles and policies
-      (iam:CreateRole, iam:DeleteRole, iam:PutRolePolicy, iam:DeleteRolePolicy,
-       iam:UpdateAssumeRolePolicy, sts:GetCallerIdentity).
+    • AWS credentials with permission to create/delete IAM roles, S3 buckets,
+      and policies (iam:CreateRole, iam:DeleteRole, iam:PutRolePolicy,
+      iam:DeleteRolePolicy, iam:UpdateAssumeRolePolicy, sts:GetCallerIdentity,
+      s3:CreateBucket, s3:DeleteBucket, s3:PutPublicAccessBlock,
+      s3:ListBucketVersions, s3:DeleteObject, s3:DeleteObjectVersion).
 
 State file
 ----------
@@ -261,6 +264,135 @@ def _update_uc_trust_policy(
     )
 
 
+def _ensure_s3_bucket(cfg: dict, bucket_name: str, region: str) -> bool:
+    """Create the S3 bucket if it does not already exist.
+
+    Returns True if the bucket was created by this call (and should therefore
+    be deleted on teardown), False if it already existed.
+    """
+    _ensure_boto3()
+    from botocore.exceptions import ClientError
+
+    session = _aws_session(cfg, region)
+    s3 = session.client("s3", region_name=region)
+
+    try:
+        s3.head_bucket(Bucket=bucket_name)
+        _ok(f"S3 bucket already exists: s3://{bucket_name}")
+        return False
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code not in ("404", "NoSuchBucket", "403"):
+            # Unexpected error — re-raise so it surfaces clearly.
+            raise
+
+    # Bucket does not exist (404/NoSuchBucket) or we got 403 on a bucket name
+    # that belongs to someone else.  403 is treated as "exists but not ours";
+    # only 404/NoSuchBucket means we should create it.
+    if code == "403":
+        _err(f"S3 bucket s3://{bucket_name} exists but is owned by another AWS account.")
+        _err("Choose a different bucket name in DATABRICKS_S3_BUCKET.")
+        raise RuntimeError(f"Bucket s3://{bucket_name} is owned by another account (HTTP 403).")
+
+    _step(f"Creating S3 bucket: s3://{bucket_name}  (region={region})")
+    try:
+        if region == "us-east-1":
+            # us-east-1 does NOT accept a LocationConstraint — it's the default.
+            s3.create_bucket(Bucket=bucket_name)
+        else:
+            s3.create_bucket(
+                Bucket=bucket_name,
+                CreateBucketConfiguration={"LocationConstraint": region},
+            )
+        # Block public access — best practice for UC storage buckets.
+        s3.put_public_access_block(
+            Bucket=bucket_name,
+            PublicAccessBlockConfiguration={
+                "BlockPublicAcls": True,
+                "IgnorePublicAcls": True,
+                "BlockPublicPolicy": True,
+                "RestrictPublicBuckets": True,
+            },
+        )
+        _ok(f"S3 bucket created: s3://{bucket_name}")
+        return True
+    except ClientError as exc:
+        _err(f"Could not create S3 bucket s3://{bucket_name}: {exc}")
+        raise
+
+
+def _delete_s3_prefix(cfg: dict, bucket_name: str, prefix: str, region: str) -> None:
+    """Delete all objects under *prefix* inside *bucket_name*."""
+    _ensure_boto3()
+    from botocore.exceptions import ClientError
+
+    session = _aws_session(cfg, region)
+    s3 = session.client("s3", region_name=region)
+
+    prefix = prefix.rstrip("/") + "/"
+    _step(f"Deleting S3 objects under s3://{bucket_name}/{prefix}")
+    paginator = s3.get_paginator("list_objects_v2")
+    deleted = 0
+    try:
+        for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+            objects = page.get("Contents", [])
+            if not objects:
+                continue
+            s3.delete_objects(
+                Bucket=bucket_name,
+                Delete={"Objects": [{"Key": obj["Key"]} for obj in objects]},
+            )
+            deleted += len(objects)
+    except ClientError as exc:
+        _warn(f"Could not fully clean S3 prefix s3://{bucket_name}/{prefix}: {exc}")
+    _ok(f"Deleted {deleted} object(s) from s3://{bucket_name}/{prefix}")
+
+
+def _delete_s3_bucket(cfg: dict, bucket_name: str, region: str) -> None:
+    """Empty and delete an S3 bucket that was created by _ensure_s3_bucket."""
+    _ensure_boto3()
+    from botocore.exceptions import ClientError
+
+    session = _aws_session(cfg, region)
+    s3 = session.client("s3", region_name=region)
+
+    # Delete all object versions and delete-markers (handles versioned buckets).
+    _step(f"Emptying S3 bucket: s3://{bucket_name}")
+    try:
+        paginator = s3.get_paginator("list_object_versions")
+        deleted = 0
+        for page in paginator.paginate(Bucket=bucket_name):
+            to_delete = [
+                {"Key": v["Key"], "VersionId": v["VersionId"]}
+                for v in page.get("Versions", []) + page.get("DeleteMarkers", [])
+            ]
+            if to_delete:
+                s3.delete_objects(Bucket=bucket_name, Delete={"Objects": to_delete})
+                deleted += len(to_delete)
+    except ClientError as exc:
+        _warn(f"Could not empty bucket (may have no versioning): {exc}")
+
+    # Also handle non-versioned objects.
+    try:
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket_name):
+            objects = page.get("Contents", [])
+            if objects:
+                s3.delete_objects(
+                    Bucket=bucket_name,
+                    Delete={"Objects": [{"Key": o["Key"]} for o in objects]},
+                )
+    except ClientError as exc:
+        _warn(f"Could not clean non-versioned objects: {exc}")
+
+    try:
+        s3.delete_bucket(Bucket=bucket_name)
+        _ok(f"S3 bucket deleted: s3://{bucket_name}")
+    except ClientError as exc:
+        _warn(f"Could not delete S3 bucket s3://{bucket_name}: {exc}")
+        _warn("Delete it manually in the AWS Console → S3.")
+
+
 def _delete_iam_role(cfg: dict, role_name: str, region: str) -> None:
     """Delete the IAM role created by _create_uc_iam_role (inline policies + role)."""
     _ensure_boto3()
@@ -312,7 +444,6 @@ def _load_config(env_file: Path) -> dict[str, str]:
         "DATABRICKS_CLIENT_ID",
         "DATABRICKS_CLIENT_SECRET",
         "DATABRICKS_AWS_REGION",
-        "DATABRICKS_S3_BUCKET",
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
@@ -329,7 +460,6 @@ def _validate_config(cfg: dict[str, str]) -> None:
         "DATABRICKS_CLIENT_ID",
         "DATABRICKS_CLIENT_SECRET",
         "DATABRICKS_AWS_REGION",
-        "DATABRICKS_S3_BUCKET",
     ]
     missing = [k for k in required if not cfg.get(k)]
     if missing:
@@ -518,8 +648,14 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     client_id     = cfg["DATABRICKS_CLIENT_ID"]
     client_secret = cfg["DATABRICKS_CLIENT_SECRET"]
     region        = cfg["DATABRICKS_AWS_REGION"]
-    ms_bucket_url = cfg["DATABRICKS_S3_BUCKET"].rstrip("/")          # s3://genierails
-    bucket_name   = ms_bucket_url.removeprefix("s3://").split("/")[0]       # genierails
+
+    # Derive the bucket name from the caller's AWS account ID.
+    # The bucket is created automatically if it does not exist (Step 0).
+    _ensure_boto3()
+    _tmp_session    = _aws_session(cfg, region)
+    _aws_account_id = _tmp_session.client("sts", region_name=region).get_caller_identity()["Account"]
+    bucket_name     = f"genie-uc-test-{_aws_account_id}"
+    ms_bucket_url   = f"s3://{bucket_name}"
 
     # Check if already provisioned
     existing = _load_state()
@@ -547,7 +683,7 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     print(f"  Workspace       : {ws_name}")
     print(f"  Metastore       : {ms_name}")
     print(f"  Region          : {region}")
-    print(f"  S3 bucket       : {bucket_name}")
+    print(f"  S3 bucket       : {bucket_name}  (auto-managed)")
     print(f"  External loc    : {ext_loc_url}")
     print(f"  IAM role        : {iam_role_name}  (will be created)")
     print(f"  SP (admin)      : {client_id}")
@@ -555,6 +691,12 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     if dry_run:
         print("\n  [DRY RUN] No resources will be created.")
         return
+
+    # ------------------------------------------------------------------
+    # Step 0: Ensure the S3 bucket exists (create it if not).
+    # We track whether WE created it so teardown can clean up accordingly.
+    # ------------------------------------------------------------------
+    bucket_created = _ensure_s3_bucket(cfg, bucket_name, region)
 
     # ------------------------------------------------------------------
     # Ensure the SDK is new enough to support compute_mode=SERVERLESS.
@@ -655,6 +797,9 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
         "metastore_id":    None,
         "ext_loc_url":     ext_loc_url,
         "iam_role_name":   iam_role_name,   # deleted by teardown
+        "bucket_name":     bucket_name,     # used by teardown for S3 cleanup
+        "bucket_created":  bucket_created,  # if True, teardown deletes the bucket
+        "ext_loc_prefix":  f"genie-test-{run_id}",  # S3 prefix to clean on teardown
         "region":          region,
         "account_id":        account_id,
         "sp_client_id":      client_id,
@@ -777,8 +922,9 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
             # AWS IAM is eventually consistent — wait for the updated trust
             # policy (including the self-assume statement) to propagate before
             # Databricks validates it when creating the External Location.
-            _warn("Waiting 15 s for trust policy propagation…")
-            time.sleep(15)
+            # 15 s is often too short; use 60 s to avoid transient failures.
+            _warn("Waiting 60 s for trust policy propagation…")
+            time.sleep(60)
         except Exception as exc:
             _warn(f"Could not update trust policy: {exc}")
             _warn("Storage credential may not work. Update the trust policy manually in AWS IAM.")
@@ -812,20 +958,32 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     if storage_cred_id:
         ext_loc_url_with_slash = ext_loc_url.rstrip("/") + "/"
         _step(f"Creating External Location: {ext_loc_url_with_slash}")
-        try:
-            from databricks.sdk import WorkspaceClient as _WC
-            w_new = _WC(host=ws_host, client_id=client_id, client_secret=client_secret)
-            el = w_new.external_locations.create(
-                name="test-external-location",
-                url=ext_loc_url_with_slash,
-                credential_name="test-ext-loc-cred",
-                comment="Test External Location — provision_test_env.py",
-            )
-            _ok(f"External Location created: {el.url}")
-            # The SP (metastore creator) has implicit admin rights on the
-            # external location it created — no explicit grant needed.
-        except Exception as exc:
-            _warn(f"Could not create External Location: {exc}")
+        # Retry with back-off because IAM trust-policy propagation is eventually
+        # consistent.  The first attempt occasionally fails with "Bucket X does not
+        # exist" even though the bucket is reachable — this is Databricks signalling
+        # that it could not assume the IAM role yet.  A short retry resolves it.
+        el_created = False
+        for _attempt, _delay in enumerate([0, 30, 60]):
+            if _delay:
+                _warn(f"  Retrying External Location creation in {_delay} s (attempt {_attempt + 1})…")
+                time.sleep(_delay)
+            try:
+                from databricks.sdk import WorkspaceClient as _WC
+                w_new = _WC(host=ws_host, client_id=client_id, client_secret=client_secret)
+                el = w_new.external_locations.create(
+                    name="test-external-location",
+                    url=ext_loc_url_with_slash,
+                    credential_name="test-ext-loc-cred",
+                    comment="Test External Location — provision_test_env.py",
+                )
+                _ok(f"External Location created: {el.url}")
+                el_created = True
+                # The SP (metastore creator) has implicit admin rights on the
+                # external location it created — no explicit grant needed.
+                break
+            except Exception as exc:
+                _warn(f"Could not create External Location (attempt {_attempt + 1}): {exc}")
+        if not el_created:
             _warn("Catalog creation will require an explicit MANAGED LOCATION.")
 
     # Note: we intentionally do NOT transfer metastore ownership to the admin
@@ -1012,6 +1170,30 @@ def cmd_teardown(dry_run: bool = False) -> None:
         _step("No IAM role in state — skipping IAM deletion")
 
     # ------------------------------------------------------------------
+    # Step 0b: S3 cleanup
+    #  • Always remove objects under the test prefix (good housekeeping).
+    #  • If we created the bucket, also delete it entirely.
+    # ------------------------------------------------------------------
+    bucket_name    = state.get("bucket_name")
+    bucket_created = state.get("bucket_created", False)
+    ext_loc_prefix = state.get("ext_loc_prefix", "")
+    region         = state.get("region", "us-east-1")
+    if bucket_name and ext_loc_prefix:
+        try:
+            _delete_s3_prefix(env_cfg, bucket_name, ext_loc_prefix, region)
+        except Exception as exc:
+            _warn(f"Could not clean S3 prefix: {exc}")
+    if bucket_name and bucket_created:
+        _step(f"Deleting S3 bucket created by provision: s3://{bucket_name}")
+        try:
+            _delete_s3_bucket(env_cfg, bucket_name, region)
+        except Exception as exc:
+            _warn(f"Could not delete S3 bucket: {exc}")
+            _warn(f"Delete it manually: aws s3 rb s3://{bucket_name} --force")
+    elif bucket_name:
+        _ok(f"Bucket s3://{bucket_name} was pre-existing — not deleted.")
+
+    # ------------------------------------------------------------------
     # Step 1: Unassign metastore from workspace (required before deletion)
     # ------------------------------------------------------------------
     _step("Unassigning metastore from workspace")
@@ -1076,6 +1258,10 @@ def cmd_teardown(dry_run: bool = False) -> None:
 
     _banner("Teardown Complete")
     print("\n  The IAM role, workspace, metastore, and admin group have been deleted.")
+    if bucket_created:
+        print(f"  S3 bucket s3://{bucket_name} was created by provision and has been deleted.")
+    elif bucket_name:
+        print(f"  S3 test prefix cleaned; bucket s3://{bucket_name} (pre-existing) was not deleted.")
     print("  Run `provision` to create a fresh environment for the next test run.")
     print()
 

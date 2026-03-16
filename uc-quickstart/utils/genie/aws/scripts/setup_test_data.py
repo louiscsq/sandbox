@@ -694,7 +694,8 @@ def _run_query(w, warehouse_id: str, sql: str):
         statement=sql.strip(),
         wait_timeout="50s",
     )
-    max_wait = 120
+    # 300s to absorb warehouse cold-start (auto-stopped warehouses take up to 3-4 min).
+    max_wait = 300
     start = time.time()
     while True:
         state = stmt.status.state
@@ -729,12 +730,46 @@ PROD_EXPECTED_ROWS = {
 }
 
 
+def _get_table_row_count_from_stats(w, warehouse_id: str, table: str) -> int | None:
+    """Return the row count from Delta table statistics (bypasses row filters).
+
+    Parses the 'Statistics' row from DESCRIBE TABLE EXTENDED, which contains
+    a string like '128 bytes, 12 rows'.  Returns None if stats are unavailable.
+    """
+    import re
+    try:
+        rows = _run_query(w, warehouse_id, f"DESCRIBE TABLE EXTENDED {table}")
+        for row in rows:
+            if row and len(row) >= 2 and str(row[0]).strip().lower() == "statistics":
+                stats_str = str(row[1])
+                m = re.search(r"(\d+)\s+rows?", stats_str, re.IGNORECASE)
+                if m:
+                    return int(m.group(1))
+        return None
+    except Exception:
+        return None
+
+
 def _verify_tables(w, warehouse_id: str, expected: dict[str, int], label: str) -> list[str]:
     """
     Assert row counts and that at least one column tag exists per table.
     Returns a list of failure messages (empty = all passed).
     """
     failures: list[str] = []
+
+    # Ensure the warehouse is running before firing verify queries.  If it
+    # auto-stopped during a long Terraform apply it needs up to ~3-4 min to
+    # restart; starting it explicitly here lets that happen before the first
+    # SELECT instead of during it (where it would appear as a timeout).
+    try:
+        from databricks.sdk.service.sql import GetWarehouseResponse, State
+        wh = w.warehouses.get(warehouse_id)
+        if getattr(wh, "state", None) not in (State.RUNNING, State.STARTING):
+            print(f"  Warehouse is {getattr(wh, 'state', 'unknown')} — starting it before verify…")
+            w.warehouses.start(warehouse_id).result()
+            print(f"  Warehouse running.")
+    except Exception as exc:
+        print(f"  WARN  Could not pre-start warehouse: {exc}")
 
     print(f"\n  [{label}] Verifying table row counts...")
     for table, expected_count in expected.items():
@@ -743,6 +778,20 @@ def _verify_tables(w, warehouse_id: str, expected: dict[str, int], label: str) -
             actual = int(rows[0][0]) if rows else 0
             if actual >= expected_count:
                 print(f"    PASS  {table}: {actual} rows (expected >= {expected_count})")
+            elif actual == 0:
+                # Row might be 0 due to an active row-filter policy (e.g. PHI
+                # encounters filtered for non-Clinical_Staff users).  Fall back
+                # to Delta table statistics from DESCRIBE TABLE EXTENDED, which
+                # are metadata-level and bypass row filters.
+                num_rows = _get_table_row_count_from_stats(w, warehouse_id, table)
+                if num_rows is not None and num_rows >= expected_count:
+                    print(f"    PASS  {table}: {num_rows} rows in Delta stats"
+                          f" (SELECT returned 0 — row filter active, expected >= {expected_count})")
+                else:
+                    display = num_rows if num_rows is not None else "unknown"
+                    msg = f"FAIL  {table}: 0 rows (Delta stats: {display}), expected >= {expected_count}"
+                    print(f"    {msg}")
+                    failures.append(msg)
             else:
                 msg = f"FAIL  {table}: {actual} rows, expected >= {expected_count}"
                 print(f"    {msg}")

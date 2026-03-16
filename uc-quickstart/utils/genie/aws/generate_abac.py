@@ -657,9 +657,11 @@ def build_prompt(ddl_text: str,
             f"You are generating config for a SINGLE Genie Space named: \"{per_space_name}\"\n\n"
             "IMPORTANT CONSTRAINTS:\n"
             "- Generate ONLY: genie_space_configs (for this space), tag_assignments "
-            "(for the tables listed below), fgac_policies, and masking functions.\n"
+            "(for the tables listed below), fgac_policies, masking functions, and "
+            "tag_policies for any NEW tag keys required by this space's data domain.\n"
+            "- If you use a tag_key in tag_assignments or fgac_policies conditions, "
+            "you MUST define the corresponding tag_policy in this output.\n"
             "- Do NOT generate 'groups' — those are established shared governance state.\n"
-            "- Do NOT generate 'tag_policies' — those are established shared governance state.\n"
             "- Do NOT generate 'group_members' — those are established shared governance state.\n"
             "- The groups to use in fgac_policies and genie ACLs are listed under "
             "REQUIRED GROUP NAMES above. Use them exactly.\n\n"
@@ -2322,7 +2324,9 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
         else:
             admin_like = [g for g in groups if re.search(r"admin|compliance|authorized", g, re.IGNORECASE)]
             non_admin = [g for g in groups if g not in admin_like]
-            to_principals = non_admin or groups[:1]
+            # Fall back to "account users" when no groups are available (e.g.
+            # per-space tfvars files where groups aren't declared).
+            to_principals = non_admin or groups[:1] or ["account users"]
             except_principals = []
 
         action = "filter" if policy_type == "POLICY_TYPE_ROW_FILTER" else "mask"
@@ -2501,7 +2505,15 @@ def _infer_column_categories_full(entity_name: str) -> set[str]:
 
 
 def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = None) -> int:
-    """Fix FGAC policies referencing functions that don't exist in the SQL file."""
+    """Fix FGAC policies referencing functions that don't exist in the SQL file.
+
+    Search order for a replacement when the declared (cat, sch, fn) is missing:
+      1. Same function name in another schema of the same catalog.
+      2. A generic fallback function in the target schema.
+      3. A generic fallback function in another schema of the same catalog.
+      4. Same function name in ANY other catalog (cross-catalog fallback).
+      5. A generic fallback function in ANY other catalog (last resort).
+    """
     if not sql_path or not sql_path.exists():
         return 0
     try:
@@ -2523,7 +2535,8 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
     if not functions_by_schema:
         return 0
 
-    replacements: list[tuple[str, str, str, str, str]] = []
+    # Replacement: (policy_name, old_fn, new_fn, old_sch, new_sch, old_cat, new_cat)
+    replacements: list[tuple[str, str, str, str, str, str, str]] = []
     for p in policies:
         fn = p.get("function_name", "")
         fn_cat = p.get("function_catalog", "")
@@ -2534,26 +2547,28 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
 
         target_fns = functions_by_schema.get((fn_cat, fn_sch), set())
         if fn in target_fns:
-            continue
+            continue  # already valid
 
-        # Function not in target schema. Check other schemas in same catalog.
-        found_schema = None
+        # 1. Same function in another schema of the same catalog
+        found = False
         for (cat, sch), fns in functions_by_schema.items():
-            if cat == fn_cat and fn in fns:
-                found_schema = sch
+            if cat == fn_cat and sch != fn_sch and fn in fns:
+                replacements.append((pname, fn, fn, fn_sch, sch, fn_cat, fn_cat))
+                found = True
                 break
-        if found_schema:
-            replacements.append((pname, fn, fn, fn_sch, found_schema))
+        if found:
             continue
 
-        # Try generic functions in target schema
-        new_fn, new_sch = None, fn_sch
+        # 2. Generic fallback in target (fn_cat, fn_sch)
+        new_fn: str | None = None
+        new_sch = fn_sch
+        new_cat = fn_cat
         for gfn in _GENERIC_FUNCTION_PREFS:
             if gfn in target_fns:
                 new_fn = gfn
                 break
 
-        # Try generic functions in other schemas of same catalog
+        # 3. Generic fallback in another schema of the same catalog
         if not new_fn:
             for (cat, sch), fns in functions_by_schema.items():
                 if cat != fn_cat:
@@ -2566,8 +2581,33 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
                 if new_fn:
                     break
 
+        # 4. Exact function name in ANY other catalog (cross-catalog)
+        if not new_fn:
+            for (cat, sch), fns in functions_by_schema.items():
+                if cat == fn_cat:
+                    continue
+                if fn in fns:
+                    new_fn = fn
+                    new_sch = sch
+                    new_cat = cat
+                    break
+
+        # 5. Generic fallback in ANY other catalog (last resort)
+        if not new_fn:
+            for (cat, sch), fns in functions_by_schema.items():
+                if cat == fn_cat:
+                    continue
+                for gfn in _GENERIC_FUNCTION_PREFS:
+                    if gfn in fns:
+                        new_fn = gfn
+                        new_sch = sch
+                        new_cat = cat
+                        break
+                if new_fn:
+                    break
+
         if new_fn:
-            replacements.append((pname, fn, new_fn, fn_sch, new_sch))
+            replacements.append((pname, fn, new_fn, fn_sch, new_sch, fn_cat, new_cat))
 
     if not replacements:
         return 0
@@ -2591,7 +2631,7 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
         matching = [r for r in replacements if r[0] == pname]
         if not matching:
             continue
-        _, old_fn, new_fn, old_sch, new_sch = matching[0]
+        _, old_fn, new_fn, old_sch, new_sch, old_cat, new_cat = matching[0]
 
         updated = block_text
         if old_fn != new_fn:
@@ -2606,13 +2646,18 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
                 rf"\g<1>{new_sch}\g<2>",
                 updated, count=1, flags=re.MULTILINE,
             )
+        if old_cat != new_cat:
+            updated = re.sub(
+                rf'(^\s*function_catalog\s*=\s*"){re.escape(old_cat)}(")',
+                rf"\g<1>{new_cat}\g<2>",
+                updated, count=1, flags=re.MULTILINE,
+            )
         if updated != block_text:
             rewritten = rewritten[:blk_start] + updated + rewritten[blk_end + 1:]
             fixes += 1
-            print(
-                f"  [AUTOFIX] Fixed function ref in policy '{pname}': "
-                f"{old_fn}@{old_sch} -> {new_fn}@{new_sch}"
-            )
+            loc_old = f"{old_fn}@{old_cat}.{old_sch}"
+            loc_new = f"{new_fn}@{new_cat}.{new_sch}"
+            print(f"  [AUTOFIX] Fixed function ref in policy '{pname}': {loc_old} -> {loc_new}")
 
     if not fixes:
         return 0
@@ -2777,10 +2822,17 @@ def bootstrap_per_space_dirs(out_dir: Path, auth_cfg: dict, hcl_text: str) -> No
     This bootstraps the per-space directory structure so that subsequent
     per-space generation runs can patch individual spaces without touching others.
     """
+    import hcl2
+    import io
+
+    # Prefer reading from the assembled on-disk file so that autofix-added
+    # fields (e.g. from autofix_genie_config_fields) are included.  Fall back
+    # to the raw hcl_text if the file hasn't been written yet.
+    assembled_path = out_dir / "abac.auto.tfvars"
+    source_text = assembled_path.read_text() if assembled_path.exists() else hcl_text
+
     try:
-        import hcl2
-        import io
-        parsed = hcl2.load(io.StringIO(hcl_text))
+        parsed = hcl2.load(io.StringIO(source_text))
         genie_cfgs: dict = parsed.get("genie_space_configs") or {}
     except Exception as e:
         print(f"  WARNING: Could not parse genie_space_configs for bootstrap: {e}")
@@ -3288,6 +3340,46 @@ Before you apply, tune for your business roles, security requirements, and Genie
             )
             hcl_block = _abac_comment_re.sub("", hcl_block)
             print("  [genie mode] Stripped ABAC sections from output (groups, tag_policies, tag_assignments, fgac_policies)")
+
+        # ── Strip legacy Genie keys when no genie_spaces are configured ───────
+        # The LLM sometimes hallucinates legacy single-space keys (genie_space_title,
+        # genie_space_description, etc.) even when env.auto.tfvars has no genie_spaces.
+        # Strip them to prevent Terraform from creating an unexpected Genie Space.
+        _configured_spaces = auth_cfg.get("genie_spaces", [])
+        if args.mode not in ("genie",) and not _configured_spaces and not args.space:
+            _legacy_genie_block_keys = (
+                "genie_space_configs",
+                "genie_benchmarks",
+                "genie_sql_filters",
+                "genie_sql_expressions",
+                "genie_sql_measures",
+                "genie_join_specs",
+            )
+            _legacy_genie_list_keys = (
+                "genie_sample_questions",
+            )
+            # Scalar string assignments (genie_space_title = "...", etc.)
+            _legacy_genie_scalar_re = re.compile(
+                r'^\s*(?:genie_space_title|genie_space_description|genie_instructions)\s*=\s*"[^"]*"\s*$',
+                re.MULTILINE,
+            )
+            _stripped_any = False
+            for _key in _legacy_genie_block_keys:
+                _before = hcl_block
+                hcl_block = remove_hcl_top_level_block(hcl_block, _key)
+                if hcl_block != _before:
+                    _stripped_any = True
+            for _key in _legacy_genie_list_keys:
+                _before = hcl_block
+                hcl_block = remove_hcl_top_level_list(hcl_block, _key)
+                if hcl_block != _before:
+                    _stripped_any = True
+            _before = hcl_block
+            hcl_block = _legacy_genie_scalar_re.sub("", hcl_block)
+            if hcl_block != _before:
+                _stripped_any = True
+            if _stripped_any:
+                print("  [auto-strip] Removed LLM-generated Genie config (no genie_spaces configured in env.auto.tfvars)")
 
         # ── Inject API-parsed genie_space_configs for existing spaces ─────────
         # The LLM generates genie_space_configs from DDL, but for spaces with a

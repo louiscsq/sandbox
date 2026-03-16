@@ -141,10 +141,12 @@ def remap_sql(text: str, pairs: list[tuple[str, str]]) -> str:
 def main() -> None:
     args = parse_args()
 
-    for path in (args.source_abac, args.source_sql):
-        if not path.exists():
-            print(f"ERROR: Required file not found: {path}")
-            sys.exit(1)
+    if not args.source_abac.exists():
+        print(f"ERROR: Required file not found: {args.source_abac}")
+        sys.exit(1)
+
+    # masking_functions.sql is optional — genie-mode envs don't generate it.
+    has_sql = args.source_sql.exists()
 
     pairs = parse_catalog_pairs(args.map)
     if not pairs:
@@ -152,18 +154,19 @@ def main() -> None:
         sys.exit(1)
 
     args.out_abac.parent.mkdir(parents=True, exist_ok=True)
-    args.out_sql.parent.mkdir(parents=True, exist_ok=True)
 
     remapped_hcl = remap_hcl(args.source_abac.read_text(), pairs)
-    remapped_sql = remap_sql(args.source_sql.read_text(), pairs)
+    remapped_sql = remap_sql(args.source_sql.read_text(), pairs) if has_sql else None
 
     # Warn if any source catalog name was not found in either output file.
+    source_abac_text = args.source_abac.read_text()
+    source_sql_text = args.source_sql.read_text() if has_sql else ""
     for src, dest in pairs:
         if src == dest:
             print(f"  Catalog unchanged: {src} (same-catalog remap is a no-op)")
             continue
-        found_in_hcl = f"{src}." in args.source_abac.read_text() or f'"{src}"' in args.source_abac.read_text()
-        found_in_sql = f"{src}." in args.source_sql.read_text() or f"CATALOG {src}" in args.source_sql.read_text().upper()
+        found_in_hcl = f"{src}." in source_abac_text or f'"{src}"' in source_abac_text
+        found_in_sql = f"{src}." in source_sql_text or f"CATALOG {src}" in source_sql_text.upper()
         if not found_in_hcl and not found_in_sql:
             print(
                 f"  WARNING: Source catalog '{src}' was not found in the generated files "
@@ -173,10 +176,14 @@ def main() -> None:
             print(f"  Catalog remap: {src} -> {dest}")
 
     args.out_abac.write_text(remapped_hcl)
-    args.out_sql.write_text(remapped_sql)
-
     print(f"  Wrote remapped generated config: {args.out_abac}")
-    print(f"  Wrote remapped masking SQL:      {args.out_sql}")
+
+    if remapped_sql is not None:
+        args.out_sql.parent.mkdir(parents=True, exist_ok=True)
+        args.out_sql.write_text(remapped_sql)
+        print(f"  Wrote remapped masking SQL:      {args.out_sql}")
+    else:
+        print(f"  Skipped masking SQL (not present in source — genie mode)")
 
 
 if __name__ == "__main__":

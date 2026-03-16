@@ -153,6 +153,27 @@ def build_account_config(full_cfg: dict, existing_cfg: dict | None) -> dict:
     return cfg
 
 
+def reconcile_tag_policy_values(account_cfg: dict, data_access_cfg: dict) -> None:
+    """Ensure every tag_assignment value appears in the account-layer tag policy.
+
+    The autofix in generate_abac.py runs on the full generated ABAC before
+    splitting, but edge cases (per-space assembly, regex mismatches) can leave
+    a tag_assignment in the data_access layer whose value is absent from the
+    account-layer policy.  Catching this here prevents silent Terraform errors
+    at apply time ('Tag value X is not an allowed value for tag policy key Y').
+    """
+    policies = {tp["key"]: tp for tp in account_cfg.get("tag_policies", [])}
+    for ta in data_access_cfg.get("tag_assignments", []):
+        key = ta.get("tag_key")
+        val = ta.get("tag_value")
+        if not key or not val or key not in policies:
+            continue
+        allowed = policies[key].get("values", [])
+        if val not in allowed:
+            policies[key]["values"] = allowed + [val]
+            print(f"  [SPLIT-REPAIR] Added '{val}' to account tag_policy '{key}'")
+
+
 def build_workspace_config(full_cfg: dict) -> dict:
     cfg: dict = {}
     for key in WORKSPACE_KEYS:
@@ -231,6 +252,11 @@ def main():
     account_cfg = build_account_config(full_cfg, existing_account_cfg)
     data_access_cfg = build_data_access_config(full_cfg)
     workspace_cfg = build_workspace_config(full_cfg)
+
+    # Safety net: ensure all tag_assignment values are in the account-layer
+    # tag policies before we write.  Catches edge cases missed by generate_abac.py's
+    # autofix (e.g. per-space assembly, regex edge cases).
+    reconcile_tag_policy_values(account_cfg, data_access_cfg)
 
     account_header = """
 # ============================================================================

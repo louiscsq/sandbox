@@ -2,18 +2,19 @@
 
 This document covers the main use cases for deploying and managing Genie Spaces with ABAC governance.
 
+**Pick the scenario that fits your situation** — these are independent starting points, not sequential steps.
+
 ## Quick reference
 
-| Workflow | When to use | Key commands |
+| Scenario | When to use | Key commands |
 | -------- | ----------- | ------------ |
-| [1. Quickstart](#1-quickstart-your-first-environment-dev) | First deployment, single team owns everything | `make setup` → `make generate` → `make apply` |
-| [2. ABAC governance only](#2-abac-governance-only-no-genie-space) | Not ready for Genie yet — set up groups, tags, masking, grants only | `make setup` → `make generate` → `make apply` (no `genie_spaces`) |
-| [3. Import an existing Genie Space](#3-import-an-existing-genie-space-govern--promote) | Bring a UI-configured space under code governance (optionally promote to prod) | `make generate` (with `genie_space_id`) → `make apply` → `make promote` |
-| [4. Add a Genie Space](#4-add-a-new-genie-space-incremental) | Add a second space without re-generating existing ones | `make generate SPACE="Space B"` → `make apply` |
-| [5. Promote dev → prod](#5-promote-dev--prod) | Replicate dev governance to prod with renamed catalogs | `make promote` → `make apply ENV=prod` |
-| [6. Independent BU environment](#6-create-an-independent-bu-environment) | BU needs its own groups, governance, and Genie spaces | `make setup ENV=bu2` → `make generate ENV=bu2` → `make apply ENV=bu2` |
-| [7. Decentralized governance](#7-decentralized-governance) | Central ABAC team + independent BU Genie teams | `make generate MODE=governance` / `make generate MODE=genie` |
-| [8. Destroy and reset](#8-destroy-and-reset) | Tear down environments or clean local state | `make destroy` / `make clean` |
+| [A. Quickstart](#scenario-a-quickstart-your-first-environment-dev) | First deployment, single team owns everything | `make setup` → `make generate` → `make apply` |
+| [B. ABAC governance only](#scenario-b-abac-governance-only-no-genie-space) | Not ready for Genie yet — set up groups, tags, masking, grants only | `make setup` → `make generate` → `make apply` (no `genie_spaces`) |
+| [C. Import an existing Genie Space](#scenario-c-import-an-existing-genie-space-govern--promote) | Bring a UI-configured space under code governance (optionally promote to prod) | `make generate` (with `genie_space_id`) → `make apply` → `make promote` |
+| [D. Add a Genie Space](#scenario-d-add-a-new-genie-space-incremental) | Add a second space without re-generating existing ones | `make generate SPACE="Space B"` → `make apply` |
+| [E. Promote dev → prod](#scenario-e-promote-dev--prod) | Replicate dev governance to prod with renamed catalogs | `make promote` → `make apply ENV=prod` |
+| [F. Independent BU environment](#scenario-f-create-an-independent-bu-environment) | BU needs its own groups, governance, and Genie spaces | `make setup ENV=bu2` → `make generate ENV=bu2` → `make apply ENV=bu2` |
+| [G. Decentralized governance](#scenario-g-decentralized-governance) | Central ABAC team + independent BU Genie teams | `make generate MODE=governance` / `make generate MODE=genie` |
 
 ### How layers are applied
 
@@ -27,7 +28,7 @@ Bare commands default to `ENV=dev`.
 
 ---
 
-## 1. Quickstart your first environment (`dev`)
+## Scenario A: Quickstart your first environment (`dev`)
 
 Use this when you are starting from scratch and want one working environment quickly.
 
@@ -123,7 +124,7 @@ Renaming a space causes Terraform to destroy and re-create it.
 
 ---
 
-## 2. ABAC governance only (no Genie Space)
+## Scenario B: ABAC governance only (no Genie Space)
 
 Use this when you want to apply data governance — groups, tag policies, column masking, row filters, catalog grants — without creating any Genie Spaces yet. You can add Genie Spaces later without changing the governance setup.
 
@@ -155,11 +156,11 @@ make apply
 #   workspace   → group workspace assignments and entitlements (no Genie Space created)
 ```
 
-When you are ready to add a Genie Space later, simply add a `genie_spaces` block to `env.auto.tfvars` and run `make generate SPACE="My Space"` (see [Section 4](#4-add-a-new-genie-space-incremental)). The existing governance is preserved.
+When you are ready to add a Genie Space later, simply add a `genie_spaces` block to `env.auto.tfvars` and run `make generate SPACE="My Space"` (see [Scenario D](#scenario-d-add-a-new-genie-space-incremental)). The existing governance is preserved.
 
 ---
 
-## 3. Import an existing Genie Space (govern + promote)
+## Scenario C: Import an existing Genie Space (govern + promote)
 
 Use this when a Genie Space was already configured in the Databricks UI or another tool, and you want to:
 
@@ -317,7 +318,7 @@ Each space's config is fetched independently. All spaces get their governance ge
 
 ---
 
-## 4. Add a new Genie Space (incremental)
+## Scenario D: Add a new Genie Space (incremental)
 
 Use this when you have a working `dev` environment with Space A fully tuned and applied, and you want to add Space B — without re-running the LLM over Space A or overwriting its hand-tuned benchmarks, masking functions, or FGAC policies.
 
@@ -397,7 +398,7 @@ make apply
 
 ---
 
-## 5. Promote `dev` → `prod`
+## Scenario E: Promote `dev` → `prod`
 
 Use this when `prod` should reuse the same table set, groups, and governance design as `dev`, but point at different catalog names.
 
@@ -435,9 +436,9 @@ make promote SOURCE_ENV=dev DEST_ENV=prod \
 
 ---
 
-## 6. Create an independent BU environment
+## Scenario F: Create an independent BU environment
 
-Use this when a second business unit needs its own groups, governance, Genie spaces, and possibly its own tables — rather than a promotion of `dev`. Choose this over [Section 5 (promote)](#5-promote-dev--prod) when:
+Use this when a second business unit needs its own groups, governance, Genie spaces, and possibly its own tables — rather than a promotion of `dev`. Choose this over [Scenario E (promote)](#scenario-e-promote-dev--prod) when:
 
 - The BU has different tables, schemas, or catalogs
 - The BU needs different groups or governance rules
@@ -461,7 +462,7 @@ make apply ENV=bu2
 
 ---
 
-## 7. Decentralized governance
+## Scenario G: Decentralized governance
 
 Use this when a **central Data Governance team** owns ABAC policies, groups, and masking functions, while **independent BU teams** create and manage their own Genie spaces.
 
@@ -545,7 +546,7 @@ make destroy ENV=account
 
 ---
 
-## 8. Destroy and reset
+## Destroy and reset
 
 ```bash
 # Destroy a workspace environment (workspace layer, then data_access)

@@ -1,4 +1,4 @@
-.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate validate validate-generated promote plan sync-tags apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci
+.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate validate validate-generated promote plan sync-tags apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import
 
 SHELL := /bin/bash
 export DATABRICKS_USER_AGENT_EXTRA := genierails/0.1.0
@@ -509,9 +509,21 @@ test-attach-promote: _bootstrap _guard-workspace-target ## Scenario: attach to U
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
-test-decentralized: _bootstrap _guard-workspace-target ## Scenario: central governance team applies ABAC, separate BU team applies Genie space
+test-decentralized: _bootstrap _guard-workspace-target ## Scenario: central governance team applies ABAC, separate BU teams apply Genie spaces
 	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario decentralized \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-abac-only: _bootstrap _guard-workspace-target ## Scenario: ABAC governance only (no Genie Space) + upgrade to add Genie Space later
+	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario abac-only \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-multi-space-import: _bootstrap _guard-workspace-target ## Scenario: import two UI-configured Genie Spaces in one make generate call
+	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario multi-space-import \
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
