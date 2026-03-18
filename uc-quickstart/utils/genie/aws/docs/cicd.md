@@ -152,6 +152,20 @@ If this folder is later promoted to its own top-level repository, the workflows 
 
 ---
 
+## Schema Drift Detection in CI
+
+Use `make audit-schema` as a scheduled CI check to detect when new columns need governance:
+
+```bash
+make audit-schema ENV=prod
+```
+
+This exits `1` if untagged sensitive columns are found (forward drift) or if existing tag assignments reference deleted columns (reverse drift). Use GitHub's built-in failed-run notifications to alert when drift is detected.
+
+When drift is found, a developer runs `make generate-delta ENV=prod` locally to classify new columns and remove stale assignments, then commits the result for CI to deploy.
+
+---
+
 ## Notes and Gotchas
 
 - Avoid running `make generate` automatically in CI unless you intentionally want LLM output in the pipeline. Most teams should generate locally, review, then commit the result.

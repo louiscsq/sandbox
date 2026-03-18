@@ -1,4 +1,4 @@
-.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate validate validate-generated promote plan sync-tags apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import
+.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated promote plan sync-tags apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift
 
 SHELL := /bin/bash
 export DATABRICKS_USER_AGENT_EXTRA := genierails/0.1.0
@@ -33,7 +33,7 @@ DEST_ENV_DIR ?= $(MODULE_ROOT)/envs/$(DEST_ENV)
 ACCOUNT_ENV_DIR ?= $(MODULE_ROOT)/envs/$(ACCOUNT_ENV)
 ROOT_RUNNER := $(MODULE_ROOT)/scripts/terraform_layer.sh
 TARGET_ENV_NAME = $(if $(TARGET_ENV),$(TARGET_ENV),$(ENV))
-TARGET_ENV_DIR = $(MODULE_ROOT)/envs/$(TARGET_ENV_NAME)
+TARGET_ENV_DIR = $(if $(filter $(TARGET_ENV_NAME),$(ENV)),$(ENV_DIR),$(MODULE_ROOT)/envs/$(TARGET_ENV_NAME))
 TARGET_DATA_ACCESS_ENV_DIR = $(TARGET_ENV_DIR)/$(DATA_ACCESS_SUBDIR)
 
 help: ## Show this help
@@ -170,6 +170,14 @@ generate: _bootstrap _guard-workspace-target ## Run generate_abac.py in the sele
 	else \
 		cd "$(ENV_DIR)" && python "$(MODULE_ROOT)/generate_abac.py" $(GENERATE_ARGS) $(if $(MODE),--mode $(MODE),); \
 	fi
+
+audit-schema: _bootstrap _guard-workspace-target ## Report untagged sensitive columns and stale tag assignments in managed tables
+	@echo "=== Schema Drift Audit ($(ENV)) ==="
+	@cd "$(ENV_DIR)" && python3 "$(MODULE_ROOT)/scripts/audit_schema_drift.py"
+
+generate-delta: _bootstrap _guard-workspace-target ## Detect schema drift and generate incremental tag_assignments (constrained to existing governed keys/values)
+	@echo "=== Generate Delta ($(ENV)) ==="
+	@cd "$(ENV_DIR)" && python3 "$(MODULE_ROOT)/generate_abac.py" --delta --auth-file auth.auto.tfvars
 
 validate-generated: _bootstrap _guard-workspace-target ## Validate generated/ files in the selected workspace environment
 	@echo "=== Validate (generated/) [$(ENV)] ==="
@@ -524,6 +532,9 @@ test-abac-only: _bootstrap _guard-workspace-target ## Scenario: ABAC governance 
 test-multi-space-import: _bootstrap _guard-workspace-target ## Scenario: import two UI-configured Genie Spaces in one make generate call
 	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario multi-space-import \
+test-schema-drift: _bootstrap _guard-workspace-target ## Scenario: column tag drift detection after ALTER TABLE ADD/DROP/RENAME COLUMN
+	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario schema-drift \
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 

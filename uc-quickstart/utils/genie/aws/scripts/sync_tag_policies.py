@@ -133,7 +133,7 @@ def main():
 
         missing = desired_values - current_values
         removed = current_values - desired_values
-        all_values = sorted(desired_values)
+        all_values = sorted(desired_values | current_values)
 
         # Update tag policy via REST API
         body = json.dumps({

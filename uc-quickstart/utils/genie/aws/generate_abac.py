@@ -916,6 +916,7 @@ def call_anthropic(prompt: str, model: str) -> str:
     message = client.messages.create(
         model=model,
         max_tokens=8192,
+        temperature=0,
         messages=[{"role": "user", "content": prompt}],
     )
     return message.content[0].text
@@ -946,6 +947,7 @@ def call_openai(prompt: str, model: str) -> str:
             {"role": "user", "content": prompt},
         ],
         max_tokens=8192,
+        temperature=0,
     )
     return response.choices[0].message.content
 
@@ -973,6 +975,7 @@ def call_databricks(prompt: str, model: str) -> str:
             ChatMessage(role=ChatMessageRole.USER, content=prompt),
         ],
         max_tokens=8192,
+        temperature=0,
     )
     return response.choices[0].message.content
 
@@ -1124,9 +1127,58 @@ def fix_hcl_syntax(tfvars_path: Path) -> int:
     return repairs
 
 
+def _fetch_live_tag_policy_values() -> dict[str, set[str]]:
+    """Query Databricks for existing tag policy keys and their allowed values.
+
+    Returns {tag_key: set(values)}.  Returns an empty dict on any failure
+    (network, auth, API unavailable) so callers can proceed without live data.
+    """
+    import ssl
+    import urllib.request
+    import json as _json
+
+    try:
+        from databricks.sdk import WorkspaceClient
+        w = WorkspaceClient(product="genierails", product_version="0.1.0")
+        token = w.config.authenticate()
+        host = (os.environ.get("DATABRICKS_HOST") or "").rstrip("/")
+        if not host:
+            return {}
+
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        req = urllib.request.Request(
+            f"{host}/api/2.1/unity-catalog/tag-policies", headers=token,
+        )
+        with urllib.request.urlopen(req, timeout=30, context=ssl_ctx) as resp:
+            data = _json.loads(resp.read())
+
+        result: dict[str, set[str]] = {}
+        for tp in data.get("tag_policies", []):
+            tag_key = tp.get("tag_key", "")
+            values = {v.get("name", "") for v in (tp.get("values") or []) if v.get("name")}
+            if tag_key:
+                result[tag_key] = values
+        return result
+    except Exception as exc:
+        print(f"  [AUTOFIX] Could not fetch live tag policies ({exc}); using file-only values")
+        return {}
+
+
 def autofix_tag_policies(tfvars_path: Path) -> int:
-    """Add tag values used in assignments/policies but missing from tag_policies."""
+    """Add tag values used in assignments/policies but missing from tag_policies.
+
+    When Databricks credentials are available (env vars set by configure_databricks_env),
+    also seeds allowed values from live tag policies so the generated config doesn't
+    reference values that don't exist in the live policy.
+    """
     text = tfvars_path.read_text()
+
+    live_policies = _fetch_live_tag_policy_values()
+    if live_policies:
+        print(f"  [AUTOFIX] Loaded {len(live_policies)} live tag policy/ies from Databricks")
 
     # Map key → (list_of_values, raw_values_text) preserving the EXACT text
     # from the file so that the replacement uses the original formatting.
@@ -1139,7 +1191,9 @@ def autofix_tag_policies(tfvars_path: Path) -> int:
     ):
         key = m.group(1)
         raw = m.group(2)
-        allowed[key] = re.findall(r'"([^"]+)"', raw)
+        file_values = re.findall(r'"([^"]+)"', raw)
+        live_values = live_policies.get(key, set())
+        allowed[key] = list(dict.fromkeys(file_values + sorted(live_values - set(file_values))))
         raw_vals_text[key] = raw
 
     used: dict[str, set[str]] = {}
@@ -1179,6 +1233,155 @@ def autofix_tag_policies(tfvars_path: Path) -> int:
         tfvars_path.write_text(text)
 
     return added_total
+
+
+# ---------------------------------------------------------------------------
+# Delta mode helpers (incremental schema-drift classification)
+# ---------------------------------------------------------------------------
+
+def validate_delta_assignments(
+    assignments: list[dict],
+    governed: dict[str, list[str]],
+    drifted_columns: set[str],
+) -> list[str]:
+    """Validate LLM-generated tag_assignments against the governed key/value universe.
+
+    Returns a list of error messages (empty if all valid).
+    """
+    errors = []
+    for ta in assignments:
+        key = ta.get("tag_key", "")
+        value = ta.get("tag_value", "")
+        entity = ta.get("entity_name", "")
+
+        if key not in governed:
+            errors.append(f"Unknown tag_key '{key}' (allowed: {sorted(governed.keys())})")
+        elif value not in governed[key]:
+            errors.append(f"Unknown tag_value '{value}' for key '{key}' (allowed: {governed[key]})")
+
+        if entity not in drifted_columns:
+            errors.append(f"entity_name '{entity}' is not in the set of drifted columns")
+
+    return errors
+
+
+def merge_delta_assignments(tfvars_path: Path, new_assignments: list[dict]) -> int:
+    """Append new tag_assignments to an existing abac.auto.tfvars file.
+
+    Deduplicates by (entity_type, entity_name, tag_key). Returns the count of
+    assignments actually added.
+    """
+    text = tfvars_path.read_text()
+
+    existing_keys: set[str] = set()
+    for m in re.finditer(
+        r'entity_type\s*=\s*"([^"]+)"[^}]*?entity_name\s*=\s*"([^"]+)"[^}]*?tag_key\s*=\s*"([^"]+)"',
+        text, re.DOTALL,
+    ):
+        existing_keys.add((m.group(1), m.group(2), m.group(3)))
+
+    to_add = []
+    for ta in new_assignments:
+        dedup_key = (ta["entity_type"], ta["entity_name"], ta["tag_key"])
+        if dedup_key not in existing_keys:
+            to_add.append(ta)
+            existing_keys.add(dedup_key)
+
+    if not to_add:
+        return 0
+
+    blocks = []
+    for ta in to_add:
+        blocks.append(
+            "  {\n"
+            f'    entity_type = "{ta["entity_type"]}"\n'
+            f'    entity_name = "{ta["entity_name"]}"\n'
+            f'    tag_key     = "{ta["tag_key"]}"\n'
+            f'    tag_value   = "{ta["tag_value"]}"\n'
+            "  },"
+        )
+    insert_text = "\n".join(blocks)
+
+    # Find the closing ] of the tag_assignments list specifically.
+    ta_match = re.search(r'tag_assignments\s*=\s*\[', text)
+    if ta_match:
+        start = ta_match.end()
+        depth = 1
+        i = start
+        while i < len(text) and depth > 0:
+            if text[i] == "[":
+                depth += 1
+            elif text[i] == "]":
+                depth -= 1
+            i += 1
+        closing = i - 1  # position of the matching ]
+        before_close = text[:closing].rstrip()
+        if not before_close.endswith(","):
+            before_close += ","
+        text = before_close + "\n" + insert_text + "\n" + text[closing:]
+    else:
+        text += f"\ntag_assignments = [\n{insert_text}\n]\n"
+
+    tfvars_path.write_text(text)
+    return len(to_add)
+
+
+def remove_stale_assignments(tfvars_path: Path, stale_entities: list[str]) -> int:
+    """Remove tag_assignment blocks whose entity_name is in stale_entities.
+
+    Returns the count of blocks removed.
+    """
+    if not stale_entities:
+        return 0
+
+    text = tfvars_path.read_text()
+    removed = 0
+
+    for entity in stale_entities:
+        pattern = re.compile(
+            r'entity_name\s*=\s*"' + re.escape(entity) + r'"'
+        )
+        while True:
+            m = pattern.search(text)
+            if not m:
+                break
+            pos = m.start()
+            block_start = None
+            i = pos - 1
+            while i >= 0:
+                if text[i] == "{":
+                    block_start = i
+                    break
+                i -= 1
+            if block_start is None:
+                break
+            block_end = None
+            depth = 1
+            j = pos
+            while j < len(text):
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        block_end = j + 1
+                        break
+                j += 1
+            if block_end is None:
+                break
+            trail = block_end
+            while trail < len(text) and text[trail] in (" ", "\t"):
+                trail += 1
+            if trail < len(text) and text[trail] == ",":
+                trail += 1
+            while trail < len(text) and text[trail] in ("\n", "\r"):
+                trail += 1
+            text = text[:block_start] + text[trail:]
+            removed += 1
+
+    if removed:
+        tfvars_path.write_text(text)
+    return removed
 
 
 def autofix_undefined_tag_refs(tfvars_path: Path) -> int:
@@ -2884,6 +3087,223 @@ def run_validation(out_dir: Path) -> bool:
     return result.returncode == 0
 
 
+def _run_delta_mode(auth_file: Path) -> None:
+    """Incremental schema-drift classification: detect drift, remove stale, classify new."""
+    from scripts.audit_schema_drift import (
+        extract_managed_tables, resolve_governed_keys,
+        extract_config_tag_assignments, detect_forward_drift,
+        detect_reverse_drift, _get_sdk_client, _get_warehouse_id,
+    )
+
+    env_dir = Path.cwd()
+    gen_abac = env_dir / "generated" / "abac.auto.tfvars"
+    da_abac = env_dir / "data_access" / "abac.auto.tfvars"
+    target_abac = gen_abac if gen_abac.exists() else da_abac
+
+    print("=" * 60)
+    print("  ABAC Delta Generator (incremental schema-drift mode)")
+    print("=" * 60)
+
+    managed_tables = extract_managed_tables(env_dir)
+    if not managed_tables:
+        print("  No managed tables found — nothing to do.")
+        return
+
+    governed_keys = resolve_governed_keys(env_dir)
+    print(f"  Governed keys: {governed_keys}")
+
+    config_assignments = extract_config_tag_assignments(env_dir)
+
+    w = _get_sdk_client(env_dir)
+    warehouse_id = _get_warehouse_id(env_dir, w)
+    if not warehouse_id:
+        print("  ERROR: No SQL warehouse available.")
+        sys.exit(1)
+
+    # ── Reverse drift: remove stale assignments ──────────────────────────
+    reverse = detect_reverse_drift(w, warehouse_id, managed_tables, config_assignments)
+    if reverse and target_abac.exists():
+        removed = remove_stale_assignments(target_abac, reverse)
+        if removed:
+            print(f"\n  Removed {removed} stale tag_assignment(s) from {target_abac.name}:")
+            for entity in reverse:
+                print(f"    {entity}")
+
+    # ── Forward drift: detect new untagged columns ───────────────────────
+    forward = detect_forward_drift(w, warehouse_id, managed_tables, governed_keys)
+    if not forward:
+        if reverse:
+            print("\n  No new untagged columns — done.")
+            print("  Run 'make apply' to deploy the stale-removal changes.")
+        else:
+            print("\n  No schema drift detected — nothing to do.")
+        return
+
+    print(f"\n  Detected {len(forward)} untagged sensitive column(s):")
+    for cat, sch, tbl, col, _ in forward:
+        print(f"    {cat}.{sch}.{tbl}.{col}")
+
+    # ── Load governed key/value universe for LLM constraint ──────────────
+    governed_kv: dict[str, list[str]] = {}
+    for source_path in [
+        env_dir.parent / "account" / "abac.auto.tfvars",
+        da_abac,
+        env_dir / "generated" / "abac.auto.tfvars",
+    ]:
+        if not source_path.exists():
+            continue
+        try:
+            import hcl2
+            with open(source_path) as f:
+                cfg = hcl2.load(f)
+            for tp in cfg.get("tag_policies", []):
+                k = tp.get("key", "")
+                if k and k not in governed_kv:
+                    governed_kv[k] = tp.get("values", [])
+            if not governed_kv:
+                for ta in cfg.get("tag_assignments", []):
+                    k = ta.get("tag_key", "")
+                    v = ta.get("tag_value", "")
+                    if k:
+                        governed_kv.setdefault(k, [])
+                        if v and v not in governed_kv[k]:
+                            governed_kv[k].append(v)
+            if governed_kv:
+                break
+        except Exception:
+            continue
+
+    if not governed_kv:
+        print("  ERROR: Could not resolve governed key/value universe from any config.")
+        sys.exit(1)
+
+    drifted_column_fqns = {
+        f"{cat}.{sch}.{tbl}.{col}" for cat, sch, tbl, col, _ in forward
+    }
+
+    # ── Build constrained LLM prompt ────────────────────────────────────
+    column_lines = "\n".join(
+        f"  - {cat}.{sch}.{tbl}.{col}" + (f"  (comment: {cmt})" if cmt else "")
+        for cat, sch, tbl, col, cmt in forward
+    )
+    kv_lines = "\n".join(
+        f"  {k}: {v}" for k, v in governed_kv.items()
+    )
+
+    prompt = (
+        "You are a data governance assistant. Classify the following new columns.\n\n"
+        "Output ONLY a list of tag_assignment HCL blocks. Do not output tag_policies, "
+        "groups, fgac_policies, or any other sections.\n\n"
+        f"Use ONLY these tag keys and their allowed values:\n{kv_lines}\n\n"
+        "Do not invent new keys or values.\n\n"
+        f"Columns to classify:\n{column_lines}\n\n"
+        "Output format (HCL, one block per column):\n"
+        "  {\n"
+        '    entity_type = "columns"\n'
+        '    entity_name = "catalog.schema.table.column"\n'
+        '    tag_key     = "<key>"\n'
+        '    tag_value   = "<value>"\n'
+        "  },\n"
+    )
+
+    auth_cfg = load_auth_config(auth_file)
+    configure_databricks_env(auth_cfg)
+
+    print(f"\n  Classifying via LLM (incremental, constrained to {len(governed_kv)} governed keys)...")
+
+    provider_cfg = PROVIDERS["databricks"]
+    call_fn = provider_cfg["call"]
+    model = provider_cfg["default_model"]
+    response_text = call_fn(prompt, model)
+
+    # ── Parse LLM response into tag_assignments ─────────────────────────
+    new_assignments: list[dict] = []
+    for m in re.finditer(
+        r'entity_type\s*=\s*"([^"]+)"[^}]*?'
+        r'entity_name\s*=\s*"([^"]+)"[^}]*?'
+        r'tag_key\s*=\s*"([^"]+)"[^}]*?'
+        r'tag_value\s*=\s*"([^"]+)"',
+        response_text, re.DOTALL,
+    ):
+        new_assignments.append({
+            "entity_type": m.group(1),
+            "entity_name": m.group(2),
+            "tag_key": m.group(3),
+            "tag_value": m.group(4),
+        })
+
+    if not new_assignments:
+        print("  WARNING: LLM returned no parseable tag_assignments.")
+        return
+
+    # ── Validate ─────────────────────────────────────────────────────────
+    errors = validate_delta_assignments(new_assignments, governed_kv, drifted_column_fqns)
+    if errors:
+        print(f"\n  ERROR: LLM output failed validation ({len(errors)} issue(s)):")
+        for err in errors:
+            print(f"    - {err}")
+        sys.exit(1)
+
+    print(f"  Validated: {len(new_assignments)} new tag_assignment(s), all keys/values within policy")
+
+    # ── Merge ────────────────────────────────────────────────────────────
+    if not target_abac.exists():
+        target_abac.parent.mkdir(parents=True, exist_ok=True)
+        target_abac.write_text("tag_assignments = [\n]\n")
+
+    added = merge_delta_assignments(target_abac, new_assignments)
+    print(f"  Merged {added} new assignment(s) into {target_abac}")
+    print("  Run 'make apply' to deploy.")
+    print("=" * 60)
+
+
+def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict) -> list[str]:
+    """Check generated config for known LLM failure modes that autofix can't handle.
+
+    Returns a list of error strings (empty = all checks passed).
+    Called after autofixes but before validation to catch issues early
+    and allow the caller to retry the LLM call.
+    """
+    errors: list[str] = []
+
+    try:
+        import hcl2 as _hcl2
+        cfg = _hcl2.loads(tfvars_path.read_text())
+    except Exception:
+        return errors  # can't parse — let validation handle it
+
+    # Check 1: genie_space_configs present when genie_spaces is configured
+    genie_spaces = auth_cfg.get("genie_spaces", [])
+    if genie_spaces:
+        gsc = cfg.get("genie_space_configs") or {}
+        if not gsc:
+            errors.append(
+                "genie_space_configs section missing from LLM output "
+                f"(expected for {len(genie_spaces)} configured genie_space(s))"
+            )
+
+    # Check 2: tag_assignment values are valid for their key in the live policy
+    live = _fetch_live_tag_policy_values()
+    if live:
+        for ta in cfg.get("tag_assignments", []):
+            key = ta.get("tag_key", "")
+            val = ta.get("tag_value", "")
+            if key in live and val and val not in live[key]:
+                file_policies = cfg.get("tag_policies", [])
+                file_vals = set()
+                for tp in file_policies:
+                    if tp.get("key") == key:
+                        file_vals = set(tp.get("values", []))
+                        break
+                if val not in file_vals:
+                    errors.append(
+                        f"tag_assignment uses '{val}' for key '{key}' — "
+                        f"not in live policy {sorted(live[key])} or file policy {sorted(file_vals)}"
+                    )
+
+    return errors
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate ABAC configuration from table DDL using AI",
@@ -2949,6 +3369,17 @@ def main():
              "Example: make generate SPACE=\"Finance Analytics\"",
     )
     parser.add_argument(
+        "--delta",
+        action="store_true",
+        help=(
+            "Incremental schema-drift mode: detect new untagged columns and stale "
+            "tag_assignments, classify new columns using the LLM (constrained to "
+            "existing governed keys/values), and merge into data_access/abac.auto.tfvars. "
+            "No full regeneration — existing config is untouched. "
+            "Example: make generate-delta ENV=prod"
+        ),
+    )
+    parser.add_argument(
         "--mode",
         choices=["full", "governance", "genie"],
         default="full",
@@ -2968,6 +3399,11 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # ── Delta mode: incremental schema-drift classification ─────────────
+    if args.delta:
+        _run_delta_mode(Path(args.auth_file))
+        return
 
     ddl_dir = Path(args.ddl_dir)
     out_dir = Path(args.out_dir)
@@ -3199,6 +3635,9 @@ def main():
     provider_cfg = PROVIDERS[args.provider]
     model = args.model or provider_cfg["default_model"]
     call_fn = provider_cfg["call"]
+
+    _semantic_retry_count = 0
+    _semantic_max_retries = args.max_retries
 
     response_text = call_with_retries(call_fn, prompt, model, args.max_retries)
 
@@ -3447,6 +3886,42 @@ Before you apply, tune for your business roles, security requirements, and Genie
         n_cat_mismatch = autofix_function_category_mismatch(tfvars_path, sql_path if sql_block else None)
         if n_cat_mismatch:
             print(f"  Auto-fixed: corrected {n_cat_mismatch} function/category mismatch(es) in fgac_policies")
+
+        # ── Semantic quality check (catches LLM issues that autofix can't fix) ──
+        semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg)
+        if semantic_errors:
+            _semantic_retry_count += 1
+            if _semantic_retry_count < _semantic_max_retries:
+                print(f"\n  [SEMANTIC CHECK FAILED] (attempt {_semantic_retry_count}/{_semantic_max_retries}):")
+                for err in semantic_errors:
+                    print(f"    - {err}")
+                print(f"  Re-generating with LLM...")
+                response_text = call_with_retries(call_fn, prompt, model, 1)
+                new_sql, new_hcl = extract_code_blocks(response_text)
+                if new_hcl:
+                    hcl_block = new_hcl
+                    tfvars_path.write_text(hcl_header + hcl_block + "\n")
+                    fix_hcl_syntax(tfvars_path)
+                    autofix_ambiguous_tag_values(tfvars_path)
+                    autofix_invalid_tag_values(tfvars_path)
+                    autofix_tag_policies(tfvars_path)
+                    autofix_undefined_tag_refs(tfvars_path)
+                    autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
+                    autofix_fgac_policy_count(tfvars_path)
+                    autofix_genie_config_fields(tfvars_path)
+                    autofix_invalid_function_refs(tfvars_path, sql_path if sql_block else None)
+                    autofix_function_category_mismatch(tfvars_path, sql_path if sql_block else None)
+                if new_sql:
+                    sql_block = new_sql
+                    sql_path = out_dir / "masking_functions.sql"
+                    sql_path.write_text(sql_block + "\n")
+                # Re-check after retry
+                semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg)
+            if semantic_errors:
+                print(f"\n  [SEMANTIC CHECK] Warnings after {_semantic_retry_count + 1} attempt(s):")
+                for err in semantic_errors:
+                    print(f"    - {err}")
+                print(f"  Proceeding with best effort.")
 
         # ── Per-space mode: bootstrap per-space dir, then merge into assembled ──
         if target_space_cfg is not None and space_key:

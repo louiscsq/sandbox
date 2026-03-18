@@ -2520,6 +2520,244 @@ genie_spaces = [
 
 
 # ---------------------------------------------------------------------------
+# Scenario: schema-drift -- Column tag drift detection
+# ---------------------------------------------------------------------------
+
+def scenario_schema_drift(
+    auth_file: Path,
+    warehouse_id: str,
+    keep_data: bool,
+    fresh_env: bool = False,
+) -> None:
+    """
+    Flow: quickstart baseline -> verify clean -> ADD COLUMN -> detect drift ->
+    generate-delta -> apply -> verify resolved -> DROP COLUMN -> detect stale ->
+    generate-delta -> verify resolved -> RENAME COLUMN -> detect both ->
+    generate-delta -> apply -> verify resolved -> teardown.
+    """
+    _banner("Scenario: schema-drift -- Column tag drift detection")
+    env = "dev"
+
+    # ── Phase A: Baseline (reuse quickstart setup) ───────────────────────
+    _preamble_cleanup(env, fresh_env=fresh_env)
+
+    _step("Creating test catalogs")
+    _setup_data(auth_file, warehouse_id=warehouse_id)
+
+    _step("Preparing env")
+    _make("setup", f"ENV={env}")
+    _write_env_tfvars(env, SPACES_FINANCE_ONLY, warehouse_id)
+
+    _step("Generating ABAC config (baseline)")
+    _make("generate", f"ENV={env}", retries=2)
+
+    _step("Applying all layers (baseline)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+
+    _step("Verifying baseline data + ABAC governance")
+    _verify_data(auth_file, dev=True, warehouse_id=warehouse_id)
+
+    _step("Verifying baseline audit does not report our test column")
+    result = _run(
+        [sys.executable, str(MODULE_ROOT / "scripts" / "audit_schema_drift.py")],
+        cwd=ENVS_DIR / env,
+        check=False,
+        capture=True,
+    )
+    if result.stdout and "emergency_ssn" in result.stdout:
+        raise RuntimeError(
+            "audit-schema should not report emergency_ssn on a clean baseline "
+            "(column hasn't been added yet)"
+        )
+    print(f"  {_green('PASS')}  Baseline audit: emergency_ssn not reported (as expected)")
+
+    # ── Phase B: Forward drift (ADD COLUMN) ──────────────────────────────
+    _step("Phase B: Adding PII column to test forward drift")
+    _sdk_run_sql(
+        auth_file,
+        f"ALTER TABLE {DEV_FIN_CAT}.finance.customers ADD COLUMN emergency_ssn STRING",
+        warehouse_id=warehouse_id,
+    )
+
+    _step("Verifying audit detects forward drift (exit 1)")
+    result = _make("audit-schema", f"ENV={env}", check=False)
+    if result.returncode == 0:
+        raise RuntimeError("audit-schema should return 1 after ADD COLUMN, got 0")
+    print(f"  {_green('PASS')}  Forward drift detected")
+
+    _step("Running generate-delta to classify new column")
+    _make("generate-delta", f"ENV={env}", retries=2)
+
+    gen_abac = ENVS_DIR / env / "generated" / "abac.auto.tfvars"
+    da_abac = ENVS_DIR / env / "data_access" / "abac.auto.tfvars"
+    delta_target = gen_abac if gen_abac.exists() else da_abac
+    _assert_contains(delta_target, "emergency_ssn", "emergency_ssn added to config")
+
+    _step("Applying delta changes")
+    _clear_apply_fingerprints(ENVS_DIR / env / "data_access")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+
+    _step("Verifying audit is clean after apply (exit 0)")
+    result = _make("audit-schema", f"ENV={env}", check=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "audit-schema should return 0 after generate-delta + apply, "
+            f"got exit {result.returncode}"
+        )
+    print(f"  {_green('PASS')}  Forward drift resolved")
+
+    # ── Phase C: Reverse drift (DROP COLUMN) ─────────────────────────────
+    _step("Phase C: Unset tags + enable column mapping + drop column to test reverse drift")
+    # Must remove all governed tags before Databricks allows DROP COLUMN.
+    # Query the actual tags on this column and unset them all.
+    _sdk_run_sql(
+        auth_file,
+        f"SELECT tag_name FROM system.information_schema.column_tags "
+        f"WHERE catalog_name = '{DEV_FIN_CAT}' AND schema_name = 'finance' "
+        f"AND table_name = 'customers' AND column_name = 'emergency_ssn'",
+        warehouse_id=warehouse_id,
+    )
+    # Unset tags — try each governed key; harmless if not present
+    for key in ["pii_level", "phi_level", "pci_level", "financial_sensitivity",
+                "compliance_scope", "aml_scope"]:
+        try:
+            _sdk_run_sql(
+                auth_file,
+                f"ALTER TABLE {DEV_FIN_CAT}.finance.customers "
+                f"ALTER COLUMN emergency_ssn UNSET TAGS ('{key}')",
+                warehouse_id=warehouse_id,
+            )
+        except Exception:
+            pass  # tag key not present — skip
+    _sdk_run_sql(
+        auth_file,
+        f"ALTER TABLE {DEV_FIN_CAT}.finance.customers SET TBLPROPERTIES ('delta.columnMapping.mode' = 'name')",
+        warehouse_id=warehouse_id,
+    )
+    _sdk_run_sql(
+        auth_file,
+        f"ALTER TABLE {DEV_FIN_CAT}.finance.customers DROP COLUMN emergency_ssn",
+        warehouse_id=warehouse_id,
+    )
+
+    _step("Verifying audit detects reverse drift (exit 1)")
+    result = _make("audit-schema", f"ENV={env}", check=False)
+    if result.returncode == 0:
+        raise RuntimeError("audit-schema should return 1 after DROP COLUMN, got 0")
+    print(f"  {_green('PASS')}  Reverse drift detected")
+
+    _step("Running generate-delta to remove stale assignment")
+    _make("generate-delta", f"ENV={env}", retries=1)
+
+    text = delta_target.read_text()
+    if "emergency_ssn" in text:
+        raise RuntimeError("emergency_ssn should have been removed from config after DROP COLUMN")
+    print(f"  {_green('PASS')}  Stale assignment removed")
+
+    _step("Verifying audit is clean after stale removal (exit 0)")
+    result = _make("audit-schema", f"ENV={env}", check=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "audit-schema should return 0 after stale removal, "
+            f"got exit {result.returncode}"
+        )
+    print(f"  {_green('PASS')}  Reverse drift resolved")
+
+    # ── Phase D: Rename (both directions) ────────────────────────────────
+    _step("Phase D: Unset tags + rename column to test combined drift")
+    for key in ["pii_level", "phi_level", "pci_level", "financial_sensitivity",
+                "compliance_scope", "aml_scope"]:
+        try:
+            _sdk_run_sql(
+                auth_file,
+                f"ALTER TABLE {DEV_FIN_CAT}.finance.customers "
+                f"ALTER COLUMN email UNSET TAGS ('{key}')",
+                warehouse_id=warehouse_id,
+            )
+        except Exception:
+            pass
+    _sdk_run_sql(
+        auth_file,
+        f"ALTER TABLE {DEV_FIN_CAT}.finance.customers RENAME COLUMN email TO contact_email",
+        warehouse_id=warehouse_id,
+    )
+
+    _step("Verifying audit detects rename drift (exit 1)")
+    result = _make("audit-schema", f"ENV={env}", check=False)
+    if result.returncode == 0:
+        raise RuntimeError("audit-schema should return 1 after RENAME COLUMN, got 0")
+    print(f"  {_green('PASS')}  Rename drift detected")
+
+    _step("Running generate-delta to handle rename")
+    _make("generate-delta", f"ENV={env}", retries=2)
+
+    text = delta_target.read_text()
+    if "contact_email" not in text:
+        raise RuntimeError("contact_email should appear in config after rename delta")
+    print(f"  {_green('PASS')}  Renamed column classified")
+
+    _step("Applying rename delta changes")
+    _clear_apply_fingerprints(ENVS_DIR / env / "data_access")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+
+    _step("Verifying audit is clean after rename apply (exit 0)")
+    result = _make("audit-schema", f"ENV={env}", check=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "audit-schema should return 0 after rename delta + apply, "
+            f"got exit {result.returncode}"
+        )
+    print(f"  {_green('PASS')}  Rename drift resolved")
+
+    # ── Teardown ─────────────────────────────────────────────────────────
+    if not keep_data:
+        _teardown_data("--teardown", "--teardown-prod", auth_file=auth_file,
+                       warehouse_id=warehouse_id)
+        _try_destroy(env)
+        _try_destroy_account()
+
+    print(f"\n  {_green(_bold('PASSED'))}  schema-drift")
+
+
+def _sdk_run_sql(auth_file: Path, sql: str, warehouse_id: str = "") -> None:
+    """Execute a single SQL statement via the Databricks SDK."""
+    import hcl2 as _hcl2
+    from databricks.sdk import WorkspaceClient as _WC
+    from databricks.sdk.service.sql import StatementState
+
+    def _s(v): return (v[0] if isinstance(v, list) else (v or "")).strip()
+
+    with open(auth_file) as f:
+        auth = _hcl2.load(f)
+    host          = _s(auth.get("databricks_workspace_host", ""))
+    client_id     = _s(auth.get("databricks_client_id", ""))
+    client_secret = _s(auth.get("databricks_client_secret", ""))
+    w = _WC(host=host, client_id=client_id, client_secret=client_secret)
+
+    wh = warehouse_id
+    if not wh:
+        for warehouse in w.warehouses.list():
+            if warehouse.id:
+                wh = warehouse.id
+                break
+
+    r = w.statement_execution.execute_statement(
+        statement=sql, warehouse_id=wh, wait_timeout="50s",
+    )
+    while r.status and r.status.state in (StatementState.PENDING, StatementState.RUNNING):
+        import time as _time
+        _time.sleep(2)
+        r = w.statement_execution.get_statement(r.statement_id)
+
+    state_str = str(getattr(getattr(r, "status", None), "state", ""))
+    if "FAILED" in state_str:
+        err = getattr(getattr(r, "status", None), "error", None)
+        msg = getattr(err, "message", str(err)) if err else "unknown"
+        raise RuntimeError(f"SQL failed: {msg}\n  SQL: {sql}")
+    print(f"  Executed: {sql[:80]}{'...' if len(sql) > 80 else ''}")
+
+
+# ---------------------------------------------------------------------------
 # Scenario registry
 # ---------------------------------------------------------------------------
 
@@ -2534,6 +2772,15 @@ SCENARIOS: dict[str, tuple[str, Callable]] = {
     "decentralized":        ("Central governance team (MODE=governance) + BU Genie teams (MODE=genie)", scenario_decentralized),
     "abac-only":            ("ABAC governance only (no Genie Space) + upgrade to Genie",         scenario_abac_only),
     "multi-space-import":   ("Import two UI-created Genie Spaces in one make generate",          scenario_multi_space_import),
+    "quickstart":      ("Single space, single catalog (Finance/dev_fin)",                    scenario_quickstart),
+    "multi-catalog":   ("One space spanning two catalogs (Combined)",                        scenario_multi_catalog),
+    "multi-space":     ("Two spaces, separate catalogs (Finance+Clinical)",                  scenario_multi_space),
+    "per-space":       ("Incremental per-space generation (isolation test)",                 scenario_per_space),
+    "promote":         ("Multi-space dev → prod promotion",                                  scenario_promote),
+    "multi-env":       ("Two independent envs (dev Finance, bu2 Clinical)",                  scenario_multi_env),
+    "attach-promote":  ("Attach to UI-created space (API discovery) + promote",              scenario_attach_and_promote),
+    "decentralized":   ("Central governance team (MODE=governance) + BU Genie team (MODE=genie)", scenario_decentralized),
+    "schema-drift":    ("Column tag drift detection after ADD/DROP/RENAME COLUMN",           scenario_schema_drift),
 }
 
 

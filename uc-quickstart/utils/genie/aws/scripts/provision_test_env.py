@@ -33,6 +33,7 @@ Environment file (scripts/account-admin.env)
   DATABRICKS_AWS_REGION       = ap-southeast-2   # or your region
 
   # AWS credentials (needed to create/delete the UC IAM role automatically).
+  # AWS credentials (needed to create/delete the UC IAM role + S3 bucket).
   # Leave blank to use the default boto3 chain: ~/.aws/credentials, AWS_PROFILE,
   # instance profile, etc.
   AWS_ACCESS_KEY_ID     =
@@ -46,6 +47,10 @@ Storage setup (fully automated)
                         run; reused if it already exists.  Deleted on teardown.
   1. AWS IAM role     — a fresh role scoped to the test-run S3 prefix, with the
                         correct UC trust policy (principal = Databricks UC service).
+  0. S3 bucket     — named genie-uc-test-<aws-account-id>.  Created on first
+                     run; reused if it already exists.
+  1. AWS IAM role  — a fresh role scoped to the test-run S3 prefix, with the
+                     correct UC trust policy (principal = Databricks UC service).
   2. Storage credential — registered in the new metastore via the Databricks API.
   3. External Location  — path-scoped S3 prefix for this run registered in the
                           new workspace, so catalogs can be created without a
@@ -60,6 +65,8 @@ Storage setup (fully automated)
       iam:DeleteRolePolicy, iam:UpdateAssumeRolePolicy, sts:GetCallerIdentity,
       s3:CreateBucket, s3:DeleteBucket, s3:PutPublicAccessBlock,
       s3:ListBucketVersions, s3:DeleteObject, s3:DeleteObjectVersion).
+       iam:DeleteRolePolicy, iam:UpdateAssumeRolePolicy, sts:GetCallerIdentity,
+       s3:CreateBucket, s3:PutPublicAccessBlock, s3:HeadBucket).
 
 State file
 ----------
@@ -415,6 +422,124 @@ def _delete_iam_role(cfg: dict, role_name: str, region: str) -> None:
         iam.delete_role(RoleName=role_name)
     except Exception as exc:
         _warn(f"Could not delete IAM role {role_name!r}: {exc}")
+
+
+def _ensure_s3_bucket(cfg: dict, bucket_name: str, region: str) -> bool:
+    """Create the S3 bucket if it does not already exist.
+
+    Returns True if the bucket was created by this call (and should therefore
+    be deleted on teardown), False if it already existed.
+    """
+    _ensure_boto3()
+    from botocore.exceptions import ClientError
+
+    session = _aws_session(cfg, region)
+    s3 = session.client("s3", region_name=region)
+
+    try:
+        s3.head_bucket(Bucket=bucket_name)
+        _ok(f"S3 bucket already exists: s3://{bucket_name}")
+        return False
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code not in ("404", "NoSuchBucket", "403"):
+            raise
+
+    if code == "403":
+        _err(f"S3 bucket s3://{bucket_name} exists but is owned by another AWS account.")
+        raise RuntimeError(f"Bucket s3://{bucket_name} is owned by another account (HTTP 403).")
+
+    _step(f"Creating S3 bucket: s3://{bucket_name}  (region={region})")
+    try:
+        if region == "us-east-1":
+            s3.create_bucket(Bucket=bucket_name)
+        else:
+            s3.create_bucket(
+                Bucket=bucket_name,
+                CreateBucketConfiguration={"LocationConstraint": region},
+            )
+        s3.put_public_access_block(
+            Bucket=bucket_name,
+            PublicAccessBlockConfiguration={
+                "BlockPublicAcls": True,
+                "IgnorePublicAcls": True,
+                "BlockPublicPolicy": True,
+                "RestrictPublicBuckets": True,
+            },
+        )
+        _ok(f"S3 bucket created: s3://{bucket_name}")
+        return True
+    except ClientError as exc:
+        _err(f"Could not create S3 bucket s3://{bucket_name}: {exc}")
+        raise
+
+
+def _delete_s3_prefix(cfg: dict, bucket_name: str, prefix: str, region: str) -> None:
+    """Delete all objects under *prefix* inside *bucket_name*."""
+    _ensure_boto3()
+    from botocore.exceptions import ClientError
+
+    session = _aws_session(cfg, region)
+    s3 = session.client("s3", region_name=region)
+
+    prefix = prefix.rstrip("/") + "/"
+    _step(f"Deleting S3 objects under s3://{bucket_name}/{prefix}")
+    paginator = s3.get_paginator("list_objects_v2")
+    deleted = 0
+    try:
+        for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+            objects = page.get("Contents", [])
+            if not objects:
+                continue
+            s3.delete_objects(
+                Bucket=bucket_name,
+                Delete={"Objects": [{"Key": obj["Key"]} for obj in objects]},
+            )
+            deleted += len(objects)
+    except ClientError as exc:
+        _warn(f"Could not fully clean S3 prefix s3://{bucket_name}/{prefix}: {exc}")
+    _ok(f"Deleted {deleted} object(s) from s3://{bucket_name}/{prefix}")
+
+
+def _delete_s3_bucket(cfg: dict, bucket_name: str, region: str) -> None:
+    """Empty and delete an S3 bucket that was created by _ensure_s3_bucket."""
+    _ensure_boto3()
+    from botocore.exceptions import ClientError
+
+    session = _aws_session(cfg, region)
+    s3 = session.client("s3", region_name=region)
+
+    _step(f"Emptying S3 bucket: s3://{bucket_name}")
+    try:
+        paginator = s3.get_paginator("list_object_versions")
+        for page in paginator.paginate(Bucket=bucket_name):
+            to_delete = [
+                {"Key": v["Key"], "VersionId": v["VersionId"]}
+                for v in page.get("Versions", []) + page.get("DeleteMarkers", [])
+            ]
+            if to_delete:
+                s3.delete_objects(Bucket=bucket_name, Delete={"Objects": to_delete})
+    except ClientError:
+        pass
+
+    try:
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket_name):
+            objects = page.get("Contents", [])
+            if objects:
+                s3.delete_objects(
+                    Bucket=bucket_name,
+                    Delete={"Objects": [{"Key": o["Key"]} for o in objects]},
+                )
+    except ClientError:
+        pass
+
+    try:
+        s3.delete_bucket(Bucket=bucket_name)
+        _ok(f"S3 bucket deleted: s3://{bucket_name}")
+    except ClientError as exc:
+        _warn(f"Could not delete S3 bucket s3://{bucket_name}: {exc}")
+        _warn("Delete it manually in the AWS Console → S3.")
 
 
 # ---------------------------------------------------------------------------
@@ -1173,6 +1298,8 @@ def cmd_teardown(dry_run: bool = False) -> None:
     # Step 0b: S3 cleanup
     #  • Always remove objects under the test prefix (good housekeeping).
     #  • If we created the bucket, also delete it entirely.
+    #  - Always remove objects under the test prefix (good housekeeping).
+    #  - If we created the bucket, also delete it entirely.
     # ------------------------------------------------------------------
     bucket_name    = state.get("bucket_name")
     bucket_created = state.get("bucket_created", False)

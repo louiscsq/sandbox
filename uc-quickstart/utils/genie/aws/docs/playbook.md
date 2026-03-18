@@ -618,3 +618,28 @@ inputs → make generate → review generated/ → make validate-generated → m
 | Account | Account groups, optional group membership, tag policy definitions |
 | Data access | Tag assignments, masking functions, FGAC policies, catalog grants |
 | Workspace | Workspace assignment, entitlements, optional warehouse, Genie Spaces and ACLs |
+
+### Schema drift detection
+
+After ABAC governance is deployed, table schemas may evolve — new columns added, existing columns dropped or renamed. The quickstart provides two commands to detect and handle schema drift without requiring a full `make generate` re-run:
+
+**`make audit-schema`** — reports untagged sensitive columns (forward drift) and stale tag assignments referencing columns that no longer exist (reverse drift). Exits `1` if drift is found, `0` if clean. CI-friendly.
+
+```bash
+make audit-schema ENV=dev
+```
+
+**`make generate-delta`** — detects drift, removes stale assignments automatically (no LLM call), then classifies new untagged columns using the LLM (constrained to your existing governed tag keys/values). Merges the result into your config additively — existing tag assignments are never touched.
+
+```bash
+make generate-delta ENV=dev
+make apply ENV=dev
+```
+
+The delta flow handles three schema change scenarios:
+
+| Schema change | What happens |
+| --- | --- |
+| `ALTER TABLE ADD COLUMN patient_ssn STRING` | Forward drift: `audit-schema` detects the new PII column; `generate-delta` classifies it and adds a `tag_assignment` |
+| `ALTER TABLE DROP COLUMN old_ssn` | Reverse drift: `audit-schema` detects the stale config entry; `generate-delta` removes it |
+| `ALTER TABLE RENAME COLUMN ssn TO tax_id` | Both: old assignment removed, new column classified |

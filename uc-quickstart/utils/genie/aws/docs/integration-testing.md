@@ -21,6 +21,7 @@ This single command runs the full pipeline in order:
 1. **Unit tests** — fast Python-only checks, no cloud resources needed
 2. **Provision** — fresh isolated Databricks workspace + metastore (~10–15 min)
 3. **Integration tests** — all 10 scenarios (~120 min)
+3. **Integration tests** — all 9 scenarios (~90 min)
 4. **Teardown** — always runs, even if tests fail, so no cloud resources are left behind
 
 Exit code is non-zero if any phase fails. Teardown is **always** executed.
@@ -101,6 +102,7 @@ python3 -m pytest tests/ -k "TagPolicies" -v        # filter by name
 |---|---|
 | `tests/test_generate_abac.py` | `fix_hcl_syntax`, `autofix_tag_policies`, `autofix_invalid_tag_values`, `autofix_undefined_tag_refs`, `autofix_missing_fgac_policies`, `autofix_fgac_policy_count` |
 | `tests/test_validate_abac.py` | `validate_groups`, `validate_tag_policies`, `validate_tag_assignments`, `validate_fgac_policies`, `parse_sql_functions`, `parse_sql_function_arg_counts`, `_condition_matches_tags` |
+| `tests/test_schema_drift.py` | PII column pattern regex, env file parsing (both `uc_tables` and `genie_spaces` shapes), governed-key resolution (4-level fallback), delta merge/dedup, delta validation (reject unknown keys/values), stale assignment removal |
 
 Unit tests catch the most common failure categories without incurring the
 cost of a full LLM + Terraform run:
@@ -135,19 +137,13 @@ Fill in `scripts/account-admin.env`:
 | `DATABRICKS_CLIENT_ID` | Account Console → User Management → Service Principals → `<SP>` → Application ID |
 | `DATABRICKS_CLIENT_SECRET` | Same SP → OAuth Secrets → Generate Secret |
 | `DATABRICKS_AWS_REGION` | AWS region for the new workspace (e.g. `ap-southeast-2`) |
-| `DATABRICKS_S3_BUCKET` | An existing S3 bucket you own (e.g. `s3://my-bucket`) — **must exist before running provision** (see below) |
 | `AWS_ACCESS_KEY_ID` | AWS credentials with IAM write permissions (see below) |
 | `AWS_SECRET_ACCESS_KEY` | — |
 | `AWS_SESSION_TOKEN` | Only needed for temporary STS credentials (see note below) |
 
-#### DATABRICKS_S3_BUCKET — what it is and how it is used
+#### S3 bucket (auto-created)
 
-`DATABRICKS_S3_BUCKET` is the **S3 bucket that holds catalog data for the test environment**.
-
-**You must create the bucket yourself before running `provision`.** The provision script does
-not create the bucket — it only creates resources inside it.  If the bucket does not exist,
-External Location creation will fail and all scenarios will error with
-`External Location 's3://…/dev_fin' does not exist`.
+The provision script auto-creates an S3 bucket named `genie-uc-test-<aws-account-id>` in the configured region. The bucket is reused across test runs and only deleted on teardown if the script created it.
 
 How the bucket is used during a test run:
 
@@ -169,10 +165,9 @@ accumulate over time.  Clean them up periodically with:
 aws s3 rm s3://<your-bucket>/ --recursive --exclude "*" --include "genie-test-*"
 ```
 
-> **Tip — use a dedicated test bucket.** Keep `DATABRICKS_S3_BUCKET` separate from any
-> production or user-facing bucket.  The provision script creates IAM roles with
-> `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` on the whole prefix, so using a
-> dedicated bucket limits blast radius.
+> **Note:** The auto-created bucket (`genie-uc-test-<aws-account-id>`) is dedicated to
+> testing. The provision script creates IAM roles with `s3:GetObject`, `s3:PutObject`,
+> `s3:DeleteObject` scoped to the test prefix inside it.
 
 #### AWS credential type recommendation
 
@@ -275,6 +270,9 @@ the next one starts.
 | **decentralized** | § 7 | Central governance team + two BU Genie teams; second BU isolation check; BU promote to prod via `apply-genie`; governance state verified unchanged throughout |
 | **abac-only** | § 2 | ABAC governance only (no Genie Space) + §2→§4 upgrade path: add Genie Space later without disturbing governance |
 | **multi-space-import** | § 3 (multi-space) | Import two UI-configured Genie Spaces in one `make generate`; assert both configs present, Terraform creates no new spaces |
+| **attach-promote** | § 3 | Import a Genie Space already configured in the UI — discover its tables from the API, govern it, then promote to prod |
+| **decentralized** | § 7 | Central governance team applies ABAC via `apply-governance` (`MODE=governance`); separate BU team creates Genie space via `apply-genie` (`MODE=genie`); asserts no cross-layer state contamination |
+| **schema-drift** | — | Detects and classifies new columns after initial ABAC deployment; tests `make audit-schema` and `make generate-delta` across ADD/DROP/RENAME COLUMN scenarios |
 
 ---
 
@@ -651,6 +649,47 @@ Two Genie Spaces are created directly via the Genie REST API (simulating spaces 
 - `generated/abac.auto.tfvars` references both `dev_fin` and `dev_clinical` catalogs
 - **No** `.genie_space_id_*` files after apply — Terraform attached, not created
 - Column tags and masking policies applied across both catalogs
+### 9. schema-drift — Column tag drift detection
+
+Validates the schema evolution workflow: detecting new untagged columns, stale tag assignments for deleted columns, and combined drift from column renames. Tests `make audit-schema` and `make generate-delta`.
+
+**Phase A — Baseline:**
+
+Uses the `quickstart` setup (Finance Analytics with `dev_fin` tables). After `make generate` + `make apply`, verifies the baseline audit does not report `emergency_ssn` (the test column that will be added later).
+
+**Phase B — Forward drift (ADD COLUMN):**
+
+`ALTER TABLE dev_fin.finance.customers ADD COLUMN emergency_ssn STRING` adds a new PII column. `make audit-schema` detects it as forward drift (exit code 1). `make generate-delta` classifies it using the LLM (constrained to existing governed keys/values) and merges the new `tag_assignment` into `generated/abac.auto.tfvars`. `make apply` deploys the tag. Re-running `make audit-schema` confirms drift is resolved (exit code 0).
+
+**Phase C — Reverse drift (DROP COLUMN):**
+
+Tags are unset, then `ALTER TABLE DROP COLUMN emergency_ssn`. `make audit-schema` detects the stale `tag_assignment` in config that references the now-deleted column. `make generate-delta` removes it automatically (no LLM call needed). Re-running `make audit-schema` confirms the stale assignment is gone.
+
+**Phase D — Combined drift (RENAME COLUMN):**
+
+Tags are unset on `email`, then `ALTER TABLE RENAME COLUMN email TO contact_email`. `make audit-schema` detects both reverse drift (stale `email` assignment) and forward drift (untagged `contact_email`). `make generate-delta` removes the old and classifies the new. `make apply` deploys. Audit confirms clean.
+
+| Step | Action |
+|---|---|
+| 1 | Quickstart baseline: setup data, generate, apply, verify |
+| 2 | `make audit-schema` — assert `emergency_ssn` not reported |
+| 3 | `ALTER TABLE ADD COLUMN emergency_ssn STRING` |
+| 4 | `make audit-schema` — assert exit 1, `emergency_ssn` in output |
+| 5 | `make generate-delta` — assert new `tag_assignment` added |
+| 6 | `make apply` — assert tag applied in `column_tags` |
+| 7 | `make audit-schema` — assert exit 0 |
+| 8 | Unset tags + `ALTER TABLE DROP COLUMN emergency_ssn` |
+| 9 | `make audit-schema` — assert exit 1 (stale assignment) |
+| 10 | `make generate-delta` — assert stale assignment removed |
+| 11 | `make audit-schema` — assert exit 0 |
+| 12 | Unset tags + `ALTER TABLE RENAME COLUMN email TO contact_email` |
+| 13 | `make audit-schema` — assert exit 1 (both directions) |
+| 14 | `make generate-delta` — old removed, new classified |
+| 15 | `make apply` — assert tag on `contact_email` |
+| 16 | `make audit-schema` — assert exit 0 |
+
+---
+
 ## Verify Checks (setup_test_data.py --verify)
 
 | Check | Source | Pass condition |
