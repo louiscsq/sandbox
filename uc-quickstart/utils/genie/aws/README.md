@@ -7,11 +7,13 @@ Put Genie onboarding on rails — with built-in guardrails. GenieRails generates
 - Tables must already exist in Unity Catalog before running `make generate`
 - A Databricks service principal with these roles:
 
-| Role | Why it's needed |
-| ---- | --------------- |
-| **Account Admin** | Create groups, assign groups to workspaces, manage group membership |
+
+| Role                | Why it's needed                                                            |
+| ------------------- | -------------------------------------------------------------------------- |
+| **Account Admin**   | Create groups, assign groups to workspaces, manage group membership        |
 | **Workspace Admin** | Grant entitlements, create warehouses, manage Genie Spaces and permissions |
-| **Metastore Admin** | Create tag policies, FGAC policies, grants, and masking functions |
+| **Metastore Admin** | Create tag policies, FGAC policies, grants, and masking functions          |
+
 
 ## Quickstart
 
@@ -88,7 +90,8 @@ See [Integration Testing](docs/integration-testing.md) for setup, credentials, s
 
 ## Roadmap
 
-- Unity Catalog metrics in Genie
-- Multi data steward / user support
-- AI-assisted tuning and troubleshooting
-- Auto-detect and import existing policies
+- Genie Workbench integration
+- Azure support
+- Telemetry enablement
+- Full schema evolution support
+

@@ -80,21 +80,25 @@ run_import() {
     return 0
   fi
 
-  # Skip silently if the resource is already tracked in Terraform state.
-  # This avoids the noisy "Resource already managed by Terraform" error block
-  # that appears on retries when a previous attempt already imported the resource.
-  # Note: we list ALL state resources and grep for an exact match because passing
-  # the address directly to `terraform state list` treats brackets as glob patterns
-  # and can fail to match addresses like groups["Junior_Analyst"].
+  # Fast-path: skip if already tracked in state. We list all resources and
+  # grep for an exact match (not the address directly, because brackets are
+  # treated as glob patterns by `terraform state list <address>`).
   if "$TF_RUNNER" "$LAYER" "$ENV_NAME" state list 2>/dev/null | grep -qF "$address"; then
     echo "  ↩ Already in state: $address (skipping)"
     return 0
   fi
 
   echo "  Importing: $address -> $id"
-  if "$TF_RUNNER" "$LAYER" "$ENV_NAME" import "$address" "$id" 2>&1; then
+  local import_out
+  import_out=$("$TF_RUNNER" "$LAYER" "$ENV_NAME" import "$address" "$id" 2>&1)
+  local import_rc=$?
+  if [ "$import_rc" -eq 0 ]; then
     echo "  ✓ Imported $address"
+  elif echo "$import_out" | grep -q "Resource already managed by Terraform"; then
+    # A previous retry already imported this resource — treat as success.
+    echo "  ↩ Already managed: $address (skipping)"
   else
+    echo "$import_out" >&2
     echo "  ✗ Failed to import $address (may not exist in Databricks)"
   fi
 }

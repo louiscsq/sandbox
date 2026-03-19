@@ -563,7 +563,8 @@ def load_validation_context(cfg: dict, result: ValidationResult, tfvars_path: Pa
             result.warn(f"Could not parse {env_path}: {e}")
 
     if (
-        not is_generated
+        env_path is not None  # Only enforce in real workspace envs that have an env.auto.tfvars
+        and not is_generated
         and parent_name != "data_access"
         and env_name != "account"
         and env_cfg.get("manage_groups", False) is False

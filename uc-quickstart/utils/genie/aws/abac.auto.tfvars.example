@@ -45,7 +45,8 @@
 # === Groups: one entry per access tier ===
 # Each key becomes a Databricks account-level group with consumer entitlements.
 groups = {
-  # "GroupName" = { description = "What this group can see" }
+  "Data_Consumer" = { description = "Read-only access to governed data" }
+  # "GroupName"   = { description = "What this group can see" }
 }
 
 # === Tag policies: governance tags for ABAC matching ===
