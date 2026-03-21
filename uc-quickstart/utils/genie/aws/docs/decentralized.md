@@ -89,6 +89,75 @@ make destroy-genie ENV=<bu-env>         # tears down workspace layer only
 
 ---
 
+## Least-privilege service principal for BU teams
+
+By default, the workspace layer looks up groups at the account level, which requires the SP to have Account Admin. In decentralized mode, BU teams can use a SP with **only Workspace Admin** by setting `genie_only = true`.
+
+### Setup
+
+1. Create a service principal with **Workspace Admin** only (no Account Admin, no Metastore Admin).
+
+2. Grant the BU team's SP access to the governed UC tables. The Genie API validates table access at space creation time, so the governance team must run these grants:
+   ```sql
+   GRANT USE CATALOG ON CATALOG <catalog> TO `<bu-sp-application-id>`;
+   GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO `<bu-sp-application-id>`;
+   GRANT SELECT ON SCHEMA <catalog>.<schema> TO `<bu-sp-application-id>`;
+   ```
+
+3. Configure the BU team's `envs/<bu-env>/auth.auto.tfvars`:
+   ```hcl
+   # databricks_account_id is not needed in genie_only mode
+   databricks_account_id    = ""
+   databricks_client_id     = "<bu-sp-client-id>"
+   databricks_client_secret = "<bu-sp-secret>"
+   databricks_workspace_id  = "<workspace-id>"
+   databricks_workspace_host = "https://<workspace>.cloud.databricks.com/"
+   ```
+
+4. Set `genie_only = true` in `envs/<bu-env>/env.auto.tfvars`:
+   ```hcl
+   genie_only = true
+
+   genie_spaces = [
+     {
+       name      = "Finance Analytics"
+       uc_tables = ["prod_catalog.finance.transactions", "prod_catalog.finance.customers"]
+     },
+   ]
+
+   sql_warehouse_id = "<existing-warehouse-id>"   # or "" to auto-create
+   ```
+
+5. Ensure `envs/<bu-env>/abac.auto.tfvars` has **empty groups** (or no groups block):
+   ```hcl
+   groups = {}
+   genie_space_configs = { ... }
+   ```
+
+6. Generate and apply:
+   ```bash
+   make generate ENV=<bu-env> MODE=genie
+   make apply-genie ENV=<bu-env>
+   ```
+
+### What changes with genie_only = true
+
+| Resource | Full mode | Genie-only mode |
+| -------- | --------- | --------------- |
+| Account group lookup | Yes (account API) | Skipped |
+| Workspace group assignment | Yes (account API) | Skipped |
+| Group entitlements | Yes (workspace API) | Skipped |
+| SQL warehouse | Auto-create or BYO | Auto-create or BYO |
+| Genie Space create/config | Yes | Yes |
+| Genie Space ACLs | Yes (per group) | Skipped (no groups) |
+| UC table access | Implicit (SP is metastore admin) | Explicit grants required (step 2) |
+
+The governance team manages groups, workspace assignments, entitlements, UC grants, and Genie Space ACLs via `make apply-governance`. The BU team only manages Genie Space creation and configuration.
+
+> **Tested:** The `genie-only` integration test (`make test-genie-only`) creates a Workspace Admin-only SP, grants it UC table access, and verifies the full `genie_only = true` flow end-to-end — including confirming that zero account-level resources appear in Terraform state.
+
+---
+
 ## Git repository strategies
 
 ### Mono-repo (recommended for simplicity)

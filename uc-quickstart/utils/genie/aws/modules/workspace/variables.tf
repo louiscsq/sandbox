@@ -106,6 +106,12 @@ variable "genie_spaces" {
   description = "Map of Genie Space key to merged infra + semantic config. Produced by the workspace root."
 }
 
+variable "genie_only" {
+  type        = bool
+  default     = false
+  description = "When true, skip account-level operations (group lookup, workspace assignment, entitlements). SP only needs Workspace Admin."
+}
+
 variable "genie_id_file_prefix" {
   type        = string
   description = "Path prefix for per-space Genie ID files. Each space appends _{key} to this prefix."

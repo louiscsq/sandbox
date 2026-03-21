@@ -3779,6 +3779,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
             )
             hcl_block = _abac_comment_re.sub("", hcl_block)
             print("  [genie mode] Stripped ABAC sections from output (groups, tag_policies, tag_assignments, fgac_policies)")
+            print("  [genie mode] Tip: set genie_only = true in env.auto.tfvars for least-privilege SP access (Workspace Admin only)")
 
         # ── Strip legacy Genie keys when no genie_spaces are configured ───────
         # The LLM sometimes hallucinates legacy single-space keys (genie_space_title,

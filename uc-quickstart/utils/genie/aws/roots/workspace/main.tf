@@ -16,8 +16,8 @@ terraform {
 
 provider "databricks" {
   alias         = "account"
-  host          = "https://accounts.cloud.databricks.com"
-  account_id    = var.databricks_account_id
+  host          = var.genie_only ? var.databricks_workspace_host : "https://accounts.cloud.databricks.com"
+  account_id    = var.genie_only ? null : var.databricks_account_id
   client_id     = var.databricks_client_id
   client_secret = var.databricks_client_secret
 }
@@ -117,7 +117,14 @@ variable "env_dir" {
 }
 
 variable "databricks_account_id" {
-  type = string
+  type    = string
+  default = ""
+}
+
+variable "genie_only" {
+  type        = bool
+  default     = false
+  description = "When true, skip account-level operations. The SP only needs Workspace Admin."
 }
 
 variable "databricks_client_id" {
@@ -368,6 +375,7 @@ module "workspace" {
   databricks_client_secret  = var.databricks_client_secret
   databricks_workspace_id   = var.databricks_workspace_id
   databricks_workspace_host = var.databricks_workspace_host
+  genie_only                = var.genie_only
   manage_groups             = var.manage_groups
   groups                    = var.groups
   sql_warehouse_id          = var.sql_warehouse_id

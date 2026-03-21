@@ -506,9 +506,11 @@ make apply-governance ENV=governance
 ```bash
 make setup ENV=bu1
 vi envs/bu1/auth.auto.tfvars
+# Workspace Admin SP only — databricks_account_id can be left empty
 
 vi envs/bu1/env.auto.tfvars
 # Define Genie spaces using tables already governed by the central team.
+# Set genie_only = true for least-privilege SP access (Workspace Admin only).
 
 make generate ENV=bu1 MODE=genie
 # Generates: genie_space_configs only (instructions, benchmarks, measures, sample questions)
@@ -518,9 +520,12 @@ make generate ENV=bu1 MODE=genie
 vi envs/bu1/generated/abac.auto.tfvars   # only genie_space_configs — tune Genie content
 
 make apply-genie ENV=bu1
-# Applies: workspace layer only (Genie spaces, ACLs, workspace assignments)
+# Applies: workspace layer only (Genie spaces + config)
 # Skips:   account and data_access layers
+# With genie_only = true: also skips group lookup, workspace assignment, entitlements
 ```
+
+> **Least privilege:** When `genie_only = true`, the BU team's SP only needs **Workspace Admin**. Account Admin and Metastore Admin are not required. The governance team must grant the BU SP `USE CATALOG`, `USE SCHEMA`, and `SELECT` on the referenced tables (the Genie API validates table access at space creation). Groups must be empty in `abac.auto.tfvars` — the governance team manages group assignments separately. See [Decentralized Governance — Least-Privilege SP](decentralized.md#least-privilege-service-principal-for-bu-teams).
 
 ### Adding a second BU
 

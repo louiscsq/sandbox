@@ -13,7 +13,7 @@ terraform {
 }
 
 data "databricks_group" "existing" {
-  for_each = var.groups
+  for_each = var.genie_only ? {} : var.groups
 
   provider     = databricks.account
   display_name = each.key
@@ -54,7 +54,7 @@ locals {
 }
 
 resource "databricks_mws_permission_assignment" "group_assignments" {
-  for_each = local.group_ids
+  for_each = var.genie_only ? {} : local.group_ids
 
   provider     = databricks.account
   workspace_id = var.databricks_workspace_id
@@ -63,7 +63,7 @@ resource "databricks_mws_permission_assignment" "group_assignments" {
 }
 
 resource "databricks_entitlements" "group_entitlements" {
-  for_each = local.group_ids
+  for_each = var.genie_only ? {} : local.group_ids
 
   provider = databricks.workspace
   group_id = each.value

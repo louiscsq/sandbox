@@ -590,6 +590,15 @@ def load_validation_context(cfg: dict, result: ValidationResult, tfvars_path: Pa
                 "membership belongs in the shared account config"
             )
 
+    # genie_only constraint: groups must be empty when genie_only = true.
+    genie_only = env_cfg.get("genie_only", False)
+    if genie_only and merged.get("groups"):
+        result.error(
+            "genie_only = true but 'groups' is non-empty. "
+            "In genie-only mode, groups are managed by the governance team — "
+            "set groups = {} or remove the groups block."
+        )
+
     # Supplement tag_policies from envs/account/ when not present in current file.
     # Tag policies are account-scoped and managed in the account layer, so data_access
     # and workspace configs won't have them directly.

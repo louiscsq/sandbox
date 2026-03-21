@@ -1,4 +1,4 @@
-.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated promote plan sync-tags apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift
+.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated promote plan sync-tags apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only
 
 SHELL := /bin/bash
 export DATABRICKS_USER_AGENT_EXTRA := genierails/0.1.0
@@ -535,6 +535,12 @@ test-multi-space-import: _bootstrap _guard-workspace-target ## Scenario: import 
 test-schema-drift: _bootstrap _guard-workspace-target ## Scenario: column tag drift detection after ALTER TABLE ADD/DROP/RENAME COLUMN
 	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario schema-drift \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-genie-only: _bootstrap _guard-workspace-target ## Scenario: genie_only=true mode — SP needs only Workspace Admin, no account resources
+	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario genie-only \
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 

@@ -59,6 +59,28 @@ GENIE_SPACE_OBJECT_ID=<space_id> \
 GENIE_ID_FILE=.genie_space_id ./scripts/genie_space.sh trash
 ```
 
+## Genie-only mode (least privilege)
+
+When `genie_only = true` is set in `env.auto.tfvars`, the workspace layer skips all account-level operations. The service principal only needs **Workspace Admin** — no Account Admin, no Metastore Admin.
+
+**UC table access is still required.** The Genie API validates table access at space creation time. The governance team (or a metastore admin) must grant the BU team's SP at least `USE CATALOG`, `USE SCHEMA`, and `SELECT` on the tables referenced in `genie_spaces`:
+
+```sql
+GRANT USE CATALOG ON CATALOG <catalog> TO `<bu-sp-application-id>`;
+GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO `<bu-sp-application-id>`;
+GRANT SELECT ON SCHEMA <catalog>.<schema> TO `<bu-sp-application-id>`;
+```
+
+In this mode:
+- Identity (groups, workspace assignment) and entitlements are managed by the governance team via `make apply-governance`
+- Data access (UC grants, FGAC, masking) is managed by the governance team
+- The BU team only manages Genie Space creation and configuration via `make apply-genie`
+- Genie Space ACLs are skipped (groups are empty); the governance team sets ACLs when applying the full workspace layer
+
+This mode is **integration tested** with a Workspace Admin-only SP (see `make test-genie-only`). The test creates a dedicated SP with no Account Admin or Metastore Admin, grants UC table access, and verifies Genie Space creation succeeds with zero account-level resources in Terraform state.
+
+See [Decentralized Governance](docs/decentralized.md) for the full setup guide.
+
 ## Summary checklist
 
 | Requirement            | Implemented in                                                                 |

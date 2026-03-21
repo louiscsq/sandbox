@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`genie_only = true` integration test** (`make test-genie-only`): Creates a
+  Workspace Admin-only SP (no Account Admin, no Metastore Admin), grants UC
+  table access, and verifies end-to-end that `genie_only = true` produces zero
+  account-level resources in Terraform state. Runs as part of `make test-ci`.
+- **UC table grant documentation**: `genie_only` mode requires explicit
+  `USE CATALOG`, `USE SCHEMA`, and `SELECT` grants from the governance team.
+  Updated GENIE_SPACE_PERMISSIONS.md, decentralized.md, and README.md.
+
 ## [0.2.0] - 2026-03-12
 
 ### Added

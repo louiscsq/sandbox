@@ -23,9 +23,15 @@
 #   Your workspace browser URL, e.g. https://dbc-....cloud.databricks.com/
 #
 # Required permissions for the service principal:
-# - Account Admin
-# - Workspace Admin
-# - Metastore Admin
+#
+# Full mode (default):
+#   - Account Admin   — create groups, assign groups to workspaces
+#   - Workspace Admin  — create warehouses, manage Genie Spaces and permissions
+#   - Metastore Admin  — create tag policies, FGAC policies, grants, masking functions
+#
+# Genie-only mode (set genie_only = true in env.auto.tfvars):
+#   - Workspace Admin only
+#   - databricks_account_id can be left empty
 #
 #   cp auth.auto.tfvars.example auth.auto.tfvars
 
