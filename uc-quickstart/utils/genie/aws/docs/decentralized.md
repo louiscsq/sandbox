@@ -91,20 +91,22 @@ make destroy-genie ENV=<bu-env>         # tears down workspace layer only
 
 ## Least-privilege service principal for BU teams
 
-By default, the workspace layer looks up groups at the account level, which requires the SP to have Account Admin. In decentralized mode, BU teams can use a SP with **only Workspace Admin** by setting `genie_only = true`.
+By default, the workspace layer looks up groups at the account level, which requires the SP to have Account Admin. In decentralized mode, BU teams can use a SP with **only workspace USER membership and the Databricks SQL access entitlement** by setting `genie_only = true`. No admin roles are needed.
 
 ### Setup
 
-1. Create a service principal with **Workspace Admin** only (no Account Admin, no Metastore Admin).
+1. Create a service principal and assign it to the workspace as a **USER** (not Admin). Grant it the **Databricks SQL access** entitlement.
 
-2. Grant the BU team's SP access to the governed UC tables. The Genie API validates table access at space creation time, so the governance team must run these grants:
+2. Grant the BU team's SP `CAN USE` on an existing SQL warehouse. The SP cannot create warehouses without admin privileges, so a BYO warehouse is required.
+
+3. Grant the BU team's SP access to the governed UC tables. The Genie API validates table access at space creation time, so the governance team must run these grants:
    ```sql
    GRANT USE CATALOG ON CATALOG <catalog> TO `<bu-sp-application-id>`;
    GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO `<bu-sp-application-id>`;
    GRANT SELECT ON SCHEMA <catalog>.<schema> TO `<bu-sp-application-id>`;
    ```
 
-3. Configure the BU team's `envs/<bu-env>/auth.auto.tfvars`:
+4. Configure the BU team's `envs/<bu-env>/auth.auto.tfvars`:
    ```hcl
    # databricks_account_id is not needed in genie_only mode
    databricks_account_id    = ""
@@ -114,7 +116,7 @@ By default, the workspace layer looks up groups at the account level, which requ
    databricks_workspace_host = "https://<workspace>.cloud.databricks.com/"
    ```
 
-4. Set `genie_only = true` in `envs/<bu-env>/env.auto.tfvars`:
+5. Set `genie_only = true` in `envs/<bu-env>/env.auto.tfvars`:
    ```hcl
    genie_only = true
 
@@ -125,16 +127,16 @@ By default, the workspace layer looks up groups at the account level, which requ
      },
    ]
 
-   sql_warehouse_id = "<existing-warehouse-id>"   # or "" to auto-create
+   sql_warehouse_id = "<existing-warehouse-id>"   # required — BYO warehouse
    ```
 
-5. Ensure `envs/<bu-env>/abac.auto.tfvars` has **empty groups** (or no groups block):
+6. Ensure `envs/<bu-env>/abac.auto.tfvars` has **empty groups** (or no groups block):
    ```hcl
    groups = {}
    genie_space_configs = { ... }
    ```
 
-6. Generate and apply:
+7. Generate and apply:
    ```bash
    make generate ENV=<bu-env> MODE=genie
    make apply-genie ENV=<bu-env>
@@ -147,14 +149,15 @@ By default, the workspace layer looks up groups at the account level, which requ
 | Account group lookup | Yes (account API) | Skipped |
 | Workspace group assignment | Yes (account API) | Skipped |
 | Group entitlements | Yes (workspace API) | Skipped |
-| SQL warehouse | Auto-create or BYO | Auto-create or BYO |
+| SQL warehouse | Auto-create or BYO | BYO only (`sql_warehouse_id` required) |
 | Genie Space create/config | Yes | Yes |
 | Genie Space ACLs | Yes (per group) | Skipped (no groups) |
-| UC table access | Implicit (SP is metastore admin) | Explicit grants required (step 2) |
+| UC table access | Implicit (SP is metastore admin) | Explicit grants required (step 3) |
+| SP role required | Account Admin + Workspace Admin + Metastore Admin | Workspace USER + SQL entitlement |
 
-The governance team manages groups, workspace assignments, entitlements, UC grants, and Genie Space ACLs via `make apply-governance`. The BU team only manages Genie Space creation and configuration.
+The governance team manages groups, workspace assignments, entitlements, warehouses, UC grants, and Genie Space ACLs via `make apply-governance`. The BU team only manages Genie Space creation and configuration.
 
-> **Tested:** The `genie-only` integration test (`make test-genie-only`) creates a Workspace Admin-only SP, grants it UC table access, and verifies the full `genie_only = true` flow end-to-end — including confirming that zero account-level resources appear in Terraform state.
+> **Tested:** The `genie-only` integration test (`make test-genie-only`) creates a minimal-privilege SP with only workspace USER + SQL entitlement (no admin roles), grants it CAN USE on a warehouse and UC table access, and verifies the full `genie_only = true` flow end-to-end — including confirming that zero account-level resources appear in Terraform state.
 
 ---
 

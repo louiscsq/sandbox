@@ -1920,15 +1920,22 @@ def _get_or_find_warehouse(auth_file: Path, warehouse_id: str) -> str:
     raise RuntimeError("No SQL warehouses found in the workspace.")
 
 
-def _create_workspace_admin_sp(
+def _create_genie_only_sp(
     auth_file: Path,
     workspace_id: str,
-    display_name: str = "genie-test-ws-admin-sp",
+    warehouse_id: str,
+    display_name: str = "genie-test-sql-user-sp",
 ) -> tuple[int, str, str]:
-    """Create a Service Principal with Workspace Admin only (no Account/Metastore Admin).
+    """Create a minimal-privilege SP for genie_only mode (no admin roles at all).
 
-    Uses the full-privilege SP (from auth_file) to create a new SP via Account API,
-    generate an OAuth secret, and assign it Workspace Admin on the given workspace.
+    The SP is assigned to the workspace as a regular USER (not Admin) and is
+    granted only the permissions needed to create Genie Spaces:
+      - Workspace membership (USER)
+      - Databricks SQL access entitlement
+      - CAN USE on the specified warehouse
+      - USE CATALOG / USE SCHEMA / SELECT on the test tables
+
+    Uses the full-privilege SP (from auth_file) to provision everything.
 
     Returns (sp_scim_id, client_id, client_secret).
     """
@@ -1966,19 +1973,18 @@ def _create_workspace_admin_sp(
     new_client_secret = secret_resp.secret
     print(f"  OAuth secret created: client_id={new_client_id}  (secret_id={secret_resp.id})")
 
-    # 3. Assign Workspace Admin only (NOT account admin, NOT metastore admin)
+    # 3. Assign workspace USER only (NOT admin) — minimal workspace membership
     ws_id = int(workspace_id) if workspace_id else 0
-    print(f"  Assigning Workspace Admin to SP {sp_scim_id} on workspace {ws_id}...")
+    print(f"  Assigning workspace USER to SP {sp_scim_id} on workspace {ws_id}...")
     a.workspace_assignment.update(
         workspace_id=ws_id,
         principal_id=sp_scim_id,
-        permissions=[WorkspacePermission.ADMIN],
+        permissions=[WorkspacePermission.USER],
     )
-    print(f"  {_green('OK')}  Workspace Admin granted (no Account Admin, no Metastore Admin)")
+    print(f"  {_green('OK')}  Workspace USER granted (no Admin, no Account Admin, no Metastore Admin)")
 
-    # 4. Grant UC table access so the SP can create Genie Spaces referencing tables.
-    #    Workspace Admin does NOT automatically grant Unity Catalog data access.
-    #    The full-privilege SP (metastore admin) issues these grants.
+    # 4. Grant Databricks SQL access entitlement + CAN USE warehouse + UC table access.
+    #    All grants are issued by the full-privilege SP.
     from databricks.sdk import WorkspaceClient as _WC_grant
     ws_host_val = cfg.get("databricks_workspace_host", "")
     ws_host_val = (ws_host_val[0] if isinstance(ws_host_val, list) else (ws_host_val or "")).strip()
@@ -1989,6 +1995,51 @@ def _create_workspace_admin_sp(
         product="genierails-test-runner",
         product_version="0.1.0",
     )
+
+    # 4a. Grant Databricks SQL access entitlement
+    print(f"  Granting Databricks SQL access entitlement to SP {sp_scim_id}...")
+    _time_sp.sleep(10)  # wait for workspace identity to propagate
+    try:
+        w_grant.api_client.do(
+            "PATCH",
+            f"/api/2.0/preview/scim/v2/ServicePrincipals/{sp_scim_id}",
+            body={
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                "Operations": [{
+                    "op": "add",
+                    "path": "entitlements",
+                    "value": [{"value": "databricks-sql-access"}],
+                }],
+            },
+        )
+        print(f"  {_green('OK')}  Databricks SQL access entitlement granted")
+    except Exception as exc:
+        print(f"  {_yellow('WARN')} Could not set SQL entitlement: {exc}")
+
+    # 4b. Grant CAN USE on the warehouse
+    if warehouse_id:
+        print(f"  Granting CAN_USE on warehouse {warehouse_id} to SP {sp_app_id}...")
+        try:
+            # Get current permissions
+            perms_resp = w_grant.api_client.do(
+                "GET", f"/api/2.0/permissions/sql/warehouses/{warehouse_id}",
+            )
+            acl = perms_resp.get("access_control_list", [])
+            acl.append({
+                "service_principal_name": sp_app_id,
+                "all_permissions": [{"permission_level": "CAN_USE"}],
+            })
+            w_grant.api_client.do(
+                "PATCH", f"/api/2.0/permissions/sql/warehouses/{warehouse_id}",
+                body={"access_control_list": [
+                    {"service_principal_name": sp_app_id, "permission_level": "CAN_USE"},
+                ]},
+            )
+            print(f"  {_green('OK')}  CAN_USE on warehouse granted")
+        except Exception as exc:
+            print(f"  {_yellow('WARN')} Could not grant warehouse CAN_USE: {exc}")
+
+    # 4c. Grant UC table access (USE CATALOG, USE SCHEMA, SELECT)
     grants_sql = [
         f"GRANT USE CATALOG ON CATALOG {DEV_FIN_CAT} TO `{sp_app_id}`",
         f"GRANT USE SCHEMA ON SCHEMA {DEV_FIN_CAT}.finance TO `{sp_app_id}`",
@@ -3026,10 +3077,10 @@ def scenario_genie_only(
     Phase 5 — Teardown:
       destroy genie_only env, teardown data, destroy account layer.
 
-    Tests: genie_only=true Terraform variable — SP needs only Workspace Admin,
-    no account-level group/assignment/entitlement resources are created.
+    Tests: genie_only=true Terraform variable — SP needs only workspace USER
+    with SQL entitlement (no admin roles at all), no account-level resources.
     """
-    _banner("Scenario: genie-only — genie_only=true mode (Workspace Admin SP only)")
+    _banner("Scenario: genie-only — genie_only=true mode (minimal-privilege SP)")
     env = "genie_only"
     ws_admin_sp_id: int | None = None   # track for teardown
 
@@ -3045,7 +3096,7 @@ def scenario_genie_only(
     _make("setup", f"ENV={env}")
 
     # ── Phase 2: Create reduced-privilege SP + configure genie_only ─────────
-    _step("Phase 2 — Creating Workspace Admin-only Service Principal")
+    _step("Phase 2 — Creating minimal-privilege SP (workspace USER + SQL entitlement)")
     cfg = _load_auth_cfg(auth_file)
     _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
     ws_id = _s(cfg.get("databricks_workspace_id", ""))
@@ -3053,7 +3104,7 @@ def scenario_genie_only(
     ws_host = _s(cfg.get("databricks_workspace_host", ""))
 
     ws_admin_sp_id, ws_admin_client_id, ws_admin_client_secret = (
-        _create_workspace_admin_sp(auth_file, ws_id)
+        _create_genie_only_sp(auth_file, ws_id, warehouse_id=resolved_wh)
     )
 
     _step("Phase 2 — Writing env.auto.tfvars with genie_only = true")
@@ -3067,10 +3118,10 @@ genie_only = true
 """
     (env_dir / "env.auto.tfvars").write_text(env_tfvars_content)
 
-    # Write auth using the REDUCED-PRIVILEGE SP (Workspace Admin only)
-    _step("Phase 2 — Writing auth.auto.tfvars with Workspace Admin-only SP credentials")
+    # Write auth using the REDUCED-PRIVILEGE SP (workspace USER + SQL entitlement only)
+    _step("Phase 2 — Writing auth.auto.tfvars with minimal-privilege SP credentials")
     auth_content = (
-        f'# Reduced-privilege SP — Workspace Admin only (no Account/Metastore Admin)\n'
+        f'# Minimal-privilege SP — workspace USER + SQL entitlement only (no admin roles)\n'
         f'# Generated by scenario_genie_only for genie_only=true permission test\n'
         f'databricks_account_id     = "{account_id}"\n'
         f'databricks_client_id      = "{ws_admin_client_id}"\n'
@@ -3079,7 +3130,7 @@ genie_only = true
         f'databricks_workspace_host = "{ws_host}"\n'
     )
     (env_dir / "auth.auto.tfvars").write_text(auth_content)
-    print(f"  {_green('OK')}  auth.auto.tfvars written with Workspace Admin-only SP")
+    print(f"  {_green('OK')}  auth.auto.tfvars written with minimal-privilege SP (USER + SQL entitlement)")
 
     # Write minimal abac.auto.tfvars with empty groups (genie_only skips account ops)
     gen_dir = env_dir / "generated"
@@ -3099,7 +3150,7 @@ genie_only = true
         _assert_not_declared_hcl(bu_gen, section,
                                  f"'{section}' not declared in genie_only output (genie mode)")
 
-    _step("Phase 3 — Applying workspace layer with Workspace Admin-only SP (make apply-genie)")
+    _step("Phase 3 — Applying workspace layer with minimal-privilege SP (make apply-genie)")
     _make("apply-genie", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
     # ── Phase 4: Assertions ─────────────────────────────────────────────────
@@ -3125,7 +3176,7 @@ genie_only = true
     if id_files:
         space_id = id_files[0].read_text().strip()
         if space_id:
-            _step("Phase 4 — Verifying Genie Space exists via API (using Workspace Admin SP)")
+            _step("Phase 4 — Verifying Genie Space exists via API (using minimal-privilege SP)")
             from databricks.sdk import WorkspaceClient
             w = WorkspaceClient(
                 host=ws_host,
@@ -3154,7 +3205,7 @@ genie_only = true
 
     # Clean up the reduced-privilege SP (uses full-privilege SP via auth_file)
     if ws_admin_sp_id is not None:
-        _step("Phase 5 — Deleting Workspace Admin-only SP")
+        _step("Phase 5 — Deleting minimal-privilege SP")
         _delete_sp(auth_file, ws_admin_sp_id)
 
     print(f"\n  {_green(_bold('PASSED'))}  genie-only")

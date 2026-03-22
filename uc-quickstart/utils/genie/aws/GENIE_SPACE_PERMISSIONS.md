@@ -61,15 +61,23 @@ GENIE_ID_FILE=.genie_space_id ./scripts/genie_space.sh trash
 
 ## Genie-only mode (least privilege)
 
-When `genie_only = true` is set in `env.auto.tfvars`, the workspace layer skips all account-level operations. The service principal only needs **Workspace Admin** — no Account Admin, no Metastore Admin.
+When `genie_only = true` is set in `env.auto.tfvars`, the workspace layer skips all account-level operations. The service principal needs only **workspace USER** membership and the **Databricks SQL access** entitlement — no Workspace Admin, no Account Admin, no Metastore Admin.
 
-**UC table access is still required.** The Genie API validates table access at space creation time. The governance team (or a metastore admin) must grant the BU team's SP at least `USE CATALOG`, `USE SCHEMA`, and `SELECT` on the tables referenced in `genie_spaces`:
+**A BYO warehouse is required** — the SP cannot create warehouses without admin privileges. Set `sql_warehouse_id` in `env.auto.tfvars` to a warehouse the SP has `CAN USE` on.
+
+**UC table access is still required.** The Genie API validates table access at space creation time. The governance team (or a metastore admin) must grant the BU team's SP the following:
 
 ```sql
+-- UC table access
 GRANT USE CATALOG ON CATALOG <catalog> TO `<bu-sp-application-id>`;
 GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO `<bu-sp-application-id>`;
 GRANT SELECT ON SCHEMA <catalog>.<schema> TO `<bu-sp-application-id>`;
 ```
+
+The governance team must also grant via workspace admin APIs:
+- **Workspace assignment** (USER) for the SP
+- **Databricks SQL access** entitlement on the SP
+- **CAN USE** permission on the SQL warehouse
 
 In this mode:
 - Identity (groups, workspace assignment) and entitlements are managed by the governance team via `make apply-governance`
@@ -77,7 +85,7 @@ In this mode:
 - The BU team only manages Genie Space creation and configuration via `make apply-genie`
 - Genie Space ACLs are skipped (groups are empty); the governance team sets ACLs when applying the full workspace layer
 
-This mode is **integration tested** with a Workspace Admin-only SP (see `make test-genie-only`). The test creates a dedicated SP with no Account Admin or Metastore Admin, grants UC table access, and verifies Genie Space creation succeeds with zero account-level resources in Terraform state.
+This mode is **integration tested** with a minimal-privilege SP (see `make test-genie-only`). The test creates a dedicated SP with only workspace USER + SQL entitlement (no admin roles), grants it CAN USE on a warehouse and UC table access, and verifies Genie Space creation succeeds with zero account-level resources in Terraform state.
 
 See [Decentralized Governance](docs/decentralized.md) for the full setup guide.
 

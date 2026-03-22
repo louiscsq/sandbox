@@ -506,11 +506,12 @@ make apply-governance ENV=governance
 ```bash
 make setup ENV=bu1
 vi envs/bu1/auth.auto.tfvars
-# Workspace Admin SP only — databricks_account_id can be left empty
+# Workspace USER SP + SQL entitlement — databricks_account_id can be left empty
 
 vi envs/bu1/env.auto.tfvars
 # Define Genie spaces using tables already governed by the central team.
-# Set genie_only = true for least-privilege SP access (Workspace Admin only).
+# Set genie_only = true for least-privilege SP access (no admin roles needed).
+# Requires sql_warehouse_id (BYO warehouse) — SP cannot create warehouses.
 
 make generate ENV=bu1 MODE=genie
 # Generates: genie_space_configs only (instructions, benchmarks, measures, sample questions)
@@ -525,7 +526,7 @@ make apply-genie ENV=bu1
 # With genie_only = true: also skips group lookup, workspace assignment, entitlements
 ```
 
-> **Least privilege:** When `genie_only = true`, the BU team's SP only needs **Workspace Admin**. Account Admin and Metastore Admin are not required. The governance team must grant the BU SP `USE CATALOG`, `USE SCHEMA`, and `SELECT` on the referenced tables (the Genie API validates table access at space creation). Groups must be empty in `abac.auto.tfvars` — the governance team manages group assignments separately. See [Decentralized Governance — Least-Privilege SP](decentralized.md#least-privilege-service-principal-for-bu-teams).
+> **Least privilege:** When `genie_only = true`, the BU team's SP only needs **workspace USER** membership and the **Databricks SQL access** entitlement — no admin roles at all. The governance team must grant the BU SP `CAN USE` on a warehouse, plus `USE CATALOG`, `USE SCHEMA`, and `SELECT` on the referenced tables (the Genie API validates table access at space creation). `sql_warehouse_id` is required (BYO warehouse). Groups must be empty in `abac.auto.tfvars` — the governance team manages group assignments separately. See [Decentralized Governance — Least-Privilege SP](decentralized.md#least-privilege-service-principal-for-bu-teams).
 
 ### Adding a second BU
 

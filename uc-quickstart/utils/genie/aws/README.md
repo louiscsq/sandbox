@@ -13,7 +13,7 @@ Put Genie onboarding on rails — with built-in guardrails. GenieRails generates
 | Full (default) | **Account Admin** | Create groups, assign groups to workspaces, manage group membership |
 | Full (default) | **Workspace Admin** | Grant entitlements, create warehouses, manage Genie Spaces and permissions |
 | Full (default) | **Metastore Admin** | Create tag policies, FGAC policies, grants, and masking functions |
-| Genie-only | **Workspace Admin** | Create warehouses, manage Genie Spaces — set `genie_only = true` in `env.auto.tfvars`. Also requires UC table access (`USE CATALOG`, `USE SCHEMA`, `SELECT`) granted by the governance team. |
+| Genie-only | **Workspace USER** + **Databricks SQL access** entitlement | Create Genie Spaces only — set `genie_only = true` and provide `sql_warehouse_id` in `env.auto.tfvars`. Also requires `CAN USE` on the warehouse and UC table access (`USE CATALOG`, `USE SCHEMA`, `SELECT`) granted by the governance team. No admin roles needed. |
 
 
 ## Quickstart

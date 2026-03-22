@@ -538,7 +538,7 @@ test-schema-drift: _bootstrap _guard-workspace-target ## Scenario: column tag dr
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
-test-genie-only: _bootstrap _guard-workspace-target ## Scenario: genie_only=true mode — SP needs only Workspace Admin, no account resources
+test-genie-only: _bootstrap _guard-workspace-target ## Scenario: genie_only=true mode — minimal-privilege SP (USER + SQL entitlement), no account resources
 	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario genie-only \
 		--auth-file "$(_ITEST_AUTH)" \

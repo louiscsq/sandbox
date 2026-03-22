@@ -1203,6 +1203,13 @@ def autofix_tag_policies(tfvars_path: Path) -> int:
         re.DOTALL,
     ):
         used.setdefault(m.group(1), set()).add(m.group(2))
+    # Also check reverse order (tag_value before tag_key in the same block).
+    for m in re.finditer(
+        r'tag_value\s*=\s*"([^"]+)"[^}]*?tag_key\s*=\s*"([^"]+)"',
+        text,
+        re.DOTALL,
+    ):
+        used.setdefault(m.group(2), set()).add(m.group(1))
     for m in re.finditer(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", text):
         used.setdefault(m.group(1), set()).add(m.group(2))
 
@@ -1579,6 +1586,10 @@ def autofix_invalid_tag_values(tfvars_path: Path) -> int:
     the values defined in tag_policies (e.g. ``rounded`` instead of
     ``rounded_amounts``).  This function removes such entries.
 
+    Uses block-level matching (``_find_bracket_section`` + ``_find_brace_blocks``)
+    to avoid cross-block regex issues where a DOTALL pattern could span
+    multiple ``{ … }`` blocks and accidentally remove valid assignments.
+
     Returns the total number of items removed.
     """
     try:
@@ -1604,91 +1615,70 @@ def autofix_invalid_tag_values(tfvars_path: Path) -> int:
     if not allowed:
         return 0
 
-    # Find tag_assignments with invalid values.
-    bad_pairs: list[tuple[str, str]] = []  # (tag_key, tag_value)
+    # Find tag_assignments with invalid values via hcl2 (order-independent).
+    bad_pairs: set[tuple[str, str]] = set()  # (tag_key, tag_value)
     for ta in cfg.get("tag_assignments", []):
         k = ta.get("tag_key", "")
         v = ta.get("tag_value", "")
         if k in allowed and v and v not in allowed[k]:
-            bad_pairs.append((k, v))
+            bad_pairs.add((k, v))
 
     if not bad_pairs:
         return 0
 
-    total_removed = 0
-    for bad_key, bad_val in bad_pairs:
-        # Find and remove the block containing both tag_key="<bad_key>" and tag_value="<bad_val>"
-        pattern = re.compile(
-            r'tag_key\s*=\s*"' + re.escape(bad_key) + r'"'
-            r'.*?'
-            r'tag_value\s*=\s*"' + re.escape(bad_val) + r'"',
-            re.DOTALL,
-        )
-        # Also check reverse order (tag_value before tag_key)
-        pattern_rev = re.compile(
-            r'tag_value\s*=\s*"' + re.escape(bad_val) + r'"'
-            r'.*?'
-            r'tag_key\s*=\s*"' + re.escape(bad_key) + r'"',
-            re.DOTALL,
-        )
-        while True:
-            m = pattern.search(text) or pattern_rev.search(text)
-            if not m:
-                break
-            pos = m.start()
-            # Walk backward to find the opening {.
-            depth = 0
-            block_start = None
-            i = pos - 1
-            while i >= 0:
-                c = text[i]
-                if c == "}":
-                    depth += 1
-                elif c == "{":
-                    if depth == 0:
-                        block_start = i
-                        break
-                    depth -= 1
-                i -= 1
-            if block_start is None:
-                break
-            # Walk forward to find the matching }.
-            depth = 0
-            block_end = None
-            i = block_start
-            while i < len(text):
-                c = text[i]
-                if c == "{":
-                    depth += 1
-                elif c == "}":
-                    depth -= 1
-                    if depth == 0:
-                        block_end = i
-                        break
-                i += 1
-            if block_end is None:
-                break
-            # Include trailing comma/whitespace.
-            end = block_end + 1
-            while end < len(text) and text[end] in (",", " ", "\t"):
-                end += 1
-            # Include leading whitespace/newline.
-            start = block_start
-            while start > 0 and text[start - 1] in (" ", "\t"):
-                start -= 1
-            if start > 0 and text[start - 1] == "\n":
-                start -= 1
-            text = text[:start] + text[end:]
-            total_removed += 1
-            print(
-                f"  [AUTOFIX] Removed tag_assignment with invalid value "
-                f"'{bad_val}' for tag_key '{bad_key}'"
-            )
+    # Use block-level matching to remove only the exact blocks that contain
+    # the invalid (tag_key, tag_value) pair — no cross-block regex.
+    section = _find_bracket_section(text, "tag_assignments")
+    if section is None:
+        return 0
 
-    if total_removed:
-        tfvars_path.write_text(text)
+    sec_start, sec_end = section
+    section_text = text[sec_start:sec_end]
+    blocks = _find_brace_blocks(section_text)
+    if not blocks:
+        return 0
 
-    return total_removed
+    # Identify blocks to remove by checking each block individually.
+    remove_indices: list[int] = []
+    for idx, (blk_start, blk_end) in enumerate(blocks):
+        block_text = section_text[blk_start:blk_end + 1]
+        tag_key_m = re.search(r'tag_key\s*=\s*"([^"]+)"', block_text)
+        tag_val_m = re.search(r'tag_value\s*=\s*"([^"]+)"', block_text)
+        if not tag_key_m or not tag_val_m:
+            continue
+        pair = (tag_key_m.group(1), tag_val_m.group(1))
+        if pair in bad_pairs:
+            remove_indices.append(idx)
+
+    if not remove_indices:
+        return 0
+
+    # Remove blocks in reverse order to preserve earlier offsets.
+    rewritten = section_text
+    for idx in reversed(remove_indices):
+        blk_start, blk_end = blocks[idx]
+        # Include trailing comma/whitespace.
+        end = blk_end + 1
+        while end < len(rewritten) and rewritten[end] in (",", " ", "\t"):
+            end += 1
+        # Include leading whitespace/newline.
+        start = blk_start
+        while start > 0 and rewritten[start - 1] in (" ", "\t"):
+            start -= 1
+        if start > 0 and rewritten[start - 1] == "\n":
+            start -= 1
+        bad_key = re.search(r'tag_key\s*=\s*"([^"]+)"', rewritten[blk_start:blk_end + 1]).group(1)
+        bad_val = re.search(r'tag_value\s*=\s*"([^"]+)"', rewritten[blk_start:blk_end + 1]).group(1)
+        rewritten = rewritten[:start] + rewritten[end:]
+        print(
+            f"  [AUTOFIX] Removed tag_assignment with invalid value "
+            f"'{bad_val}' for tag_key '{bad_key}'"
+        )
+
+    text = text[:sec_start] + rewritten + text[sec_end:]
+    tfvars_path.write_text(text)
+
+    return len(remove_indices)
 
 
 # Databricks platform limit for ABAC column-mask/row-filter policies per catalog.
@@ -2213,12 +2203,13 @@ def autofix_ambiguous_tag_values(tfvars_path: Path) -> int:
 
     rewritten = section_text
     updates = 0
+    normalized_values: set[tuple[str, str]] = set()  # (tag_key, normalized_value)
     for blk_start, blk_end in reversed(blocks):
         block_text = rewritten[blk_start:blk_end + 1]
-        entity_type_match = re.search(r'^\s*entity_type\s*=\s*"([^"]+)"', block_text, re.MULTILINE)
-        entity_name_match = re.search(r'^\s*entity_name\s*=\s*"([^"]+)"', block_text, re.MULTILINE)
-        tag_key_match = re.search(r'^\s*tag_key\s*=\s*"([^"]+)"', block_text, re.MULTILINE)
-        tag_value_match = re.search(r'^\s*tag_value\s*=\s*"([^"]+)"', block_text, re.MULTILINE)
+        entity_type_match = re.search(r'entity_type\s*=\s*"([^"]+)"', block_text)
+        entity_name_match = re.search(r'entity_name\s*=\s*"([^"]+)"', block_text)
+        tag_key_match = re.search(r'tag_key\s*=\s*"([^"]+)"', block_text)
+        tag_value_match = re.search(r'tag_value\s*=\s*"([^"]+)"', block_text)
         if not (entity_type_match and entity_name_match and tag_key_match and tag_value_match):
             continue
 
@@ -2238,16 +2229,16 @@ def autofix_ambiguous_tag_values(tfvars_path: Path) -> int:
             continue
 
         updated_block = re.sub(
-            r'(^\s*tag_value\s*=\s*")masked_contact(")',
+            r'(tag_value\s*=\s*")masked_contact(")',
             rf"\1{normalized_value}\2",
             block_text,
             count=1,
-            flags=re.MULTILINE,
         )
         if updated_block == block_text:
             continue
 
         rewritten = rewritten[:blk_start] + updated_block + rewritten[blk_end + 1:]
+        normalized_values.add((tag_key, normalized_value))
         updates += 1
         print(
             f"  [AUTOFIX] Normalized {tag_key} on '{entity_name}' "
@@ -2258,6 +2249,26 @@ def autofix_ambiguous_tag_values(tfvars_path: Path) -> int:
         return 0
 
     text = text[:sec_start] + rewritten + text[sec_end:]
+
+    # Also add normalized values to tag_policies so that
+    # autofix_invalid_tag_values (which runs next) doesn't remove
+    # the assignments we just normalized.
+    for tag_key, norm_val in normalized_values:
+        tp_pattern = re.compile(
+            r'(\{\s*key\s*=\s*"' + re.escape(tag_key) + r'"[^}]*?values\s*=\s*\[)([^\]]*?)(\])',
+            re.DOTALL,
+        )
+        tp_match = tp_pattern.search(text)
+        if tp_match:
+            existing_vals = re.findall(r'"([^"]+)"', tp_match.group(2))
+            if norm_val not in existing_vals:
+                new_vals = tp_match.group(2).rstrip()
+                if new_vals and not new_vals.rstrip().endswith(","):
+                    new_vals += ","
+                new_vals += f' "{norm_val}"'
+                text = text[:tp_match.start(2)] + new_vals + text[tp_match.end(2):]
+                print(f"  [AUTOFIX] Added '{norm_val}' to tag_policy '{tag_key}'")
+
     tfvars_path.write_text(text)
     return updates
 
@@ -2282,6 +2293,15 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
         return 0
 
     available_functions = _parse_sql_function_names(sql_path)
+
+    # Parse arg counts so _infer_function can filter by policy-type compat.
+    fn_arg_counts: dict[str, int] = {}
+    if sql_path and sql_path.exists():
+        try:
+            from validate_abac import parse_sql_function_arg_counts
+            fn_arg_counts = parse_sql_function_arg_counts(sql_path)
+        except Exception:
+            pass
 
     def _extract_tag_refs(condition: str) -> tuple[list[tuple[str, str]], list[str]]:
         value_refs = re.findall(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", condition or "")
@@ -2380,8 +2400,18 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
         tkey = assignment.get("tag_key", "").lower()
         tval = assignment.get("tag_value", "").lower()
         blob = f"{ename} {tkey} {tval}"
+        is_table = assignment.get("entity_type") == "tables"
+        # Column masks need 1-arg functions; row filters need 0-arg functions.
+        expected_args = 0 if is_table else 1
+
+        def _arg_count_ok(fn_name: str) -> bool:
+            """Return True if the function's arg count matches the policy type."""
+            if fn_name not in fn_arg_counts:
+                return True  # unknown — allow (other autofixes will catch)
+            return fn_arg_counts[fn_name] == expected_args
+
         preferred: list[str] = []
-        if assignment.get("entity_type") == "tables":
+        if is_table:
             if any(tok in blob for tok in ("pci", "card")):
                 preferred.extend([
                     "filter_pci_authorized", "filter_pci_compliance_only",
@@ -2427,22 +2457,22 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
                 preferred.append("mask_redact")
         # Only add generic masking fallbacks for column-level assignments.
         # Row filter functions must take 0 arguments; masking functions take 1.
-        if assignment.get("entity_type") != "tables":
+        if not is_table:
             preferred.extend(["mask_redact", "mask_nullify", "mask_pii_partial"])
         for fn in preferred:
-            if not available_functions or fn in available_functions:
+            if (not available_functions or fn in available_functions) and _arg_count_ok(fn):
                 return fn
         # Last-resort: pick any available function of the right type from the SQL
         # file rather than returning None (which causes the autofix to skip adding
         # coverage and lets validation fail). Row filters take 0 args; column masks
-        # take 1, so we look for the appropriate naming convention.
+        # take 1, so we look for the appropriate naming convention AND verify arg count.
         if available_functions:
-            if assignment.get("entity_type") == "tables":
-                filter_fns = sorted(f for f in available_functions if f.startswith("filter_"))
+            if is_table:
+                filter_fns = sorted(f for f in available_functions if f.startswith("filter_") and _arg_count_ok(f))
                 if filter_fns:
                     return filter_fns[0]
             else:
-                mask_fns = sorted(f for f in available_functions if f.startswith("mask_"))
+                mask_fns = sorted(f for f in available_functions if f.startswith("mask_") and _arg_count_ok(f))
                 if mask_fns:
                     return mask_fns[0]
         return None
@@ -2868,6 +2898,152 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
     text = text[:sec_start] + rewritten + text[sec_end:]
     tfvars_path.write_text(text)
     return fixes
+
+
+def autofix_fgac_arg_count_mismatch(tfvars_path: Path, sql_path: Path | None = None) -> int:
+    """Remove FGAC policies whose function arg count mismatches the policy type.
+
+    Column masks (POLICY_TYPE_COLUMN_MASK) require exactly 1 argument.
+    Row filters (POLICY_TYPE_ROW_FILTER) require exactly 0 arguments.
+
+    When the LLM generates a row_filter referencing a column mask function (or
+    vice versa), Terraform apply fails with 'policy definition requires N
+    argument(s) but the referred function takes M argument(s)'.
+    """
+    if not sql_path or not sql_path.exists():
+        return 0
+    try:
+        import hcl2 as _hcl2
+    except ImportError:
+        return 0
+
+    text = tfvars_path.read_text()
+    try:
+        cfg = _hcl2.loads(text)
+    except Exception:
+        return 0
+
+    policies = cfg.get("fgac_policies", []) or []
+    if not policies:
+        return 0
+
+    # Parse arg counts from SQL.  Also infer from function name prefix as fallback.
+    from validate_abac import parse_sql_function_arg_counts
+    fn_arg_counts = parse_sql_function_arg_counts(sql_path)
+
+    # Build lookup of functions by arg count for replacement candidates.
+    available_functions = _parse_sql_function_names(sql_path)
+    fns_by_args: dict[int, list[str]] = {}
+    for fn_name, argc in fn_arg_counts.items():
+        fns_by_args.setdefault(argc, []).append(fn_name)
+
+    bad_policies: list[tuple[str, str, str, int]] = []  # (name, fn, ptype, expected_args)
+    for p in policies:
+        ptype = p.get("policy_type", "")
+        fn = p.get("function_name", "")
+        pname = p.get("name", "")
+        if not fn or not pname:
+            continue
+
+        # Expected arg count for the policy type.
+        if ptype == "POLICY_TYPE_COLUMN_MASK":
+            expected_args = 1
+        elif ptype == "POLICY_TYPE_ROW_FILTER":
+            expected_args = 0
+        else:
+            continue
+
+        actual_args = fn_arg_counts.get(fn)
+        if actual_args is None:
+            continue  # unknown function — let other autofixes handle it
+        if actual_args != expected_args:
+            bad_policies.append((pname, fn, ptype, expected_args))
+
+    if not bad_policies:
+        return 0
+
+    bad_policy_names = {bp[0] for bp in bad_policies}
+    # Map policy name → replacement function (if one can be found).
+    replacements: dict[str, str] = {}
+    for pname, old_fn, ptype, expected_args in bad_policies:
+        candidates = sorted(fns_by_args.get(expected_args, []))
+        # Prefer functions matching the naming convention (mask_ for columns, filter_ for rows).
+        prefix = "filter_" if ptype == "POLICY_TYPE_ROW_FILTER" else "mask_"
+        typed_candidates = [c for c in candidates if c.startswith(prefix)]
+        # Pick a generic fallback from typed candidates.
+        if typed_candidates:
+            replacements[pname] = typed_candidates[0]
+        elif candidates:
+            replacements[pname] = candidates[0]
+
+    # Apply replacements or removals in the file.
+    section = _find_bracket_section(text, "fgac_policies")
+    if section is None:
+        return 0
+
+    sec_start, sec_end = section
+    section_text = text[sec_start:sec_end]
+    blocks = _find_brace_blocks(section_text)
+    if not blocks:
+        return 0
+
+    remove_indices: list[int] = []
+    rewritten = section_text
+    # First pass: replace functions where possible, mark for removal otherwise.
+    # Process in reverse to preserve offsets.
+    for idx in range(len(blocks) - 1, -1, -1):
+        blk_start, blk_end = blocks[idx]
+        block_text = rewritten[blk_start:blk_end + 1]
+        name_m = re.search(r'name\s*=\s*"([^"]+)"', block_text)
+        if not name_m or name_m.group(1) not in bad_policy_names:
+            continue
+        pname = name_m.group(1)
+        if pname in replacements:
+            new_fn = replacements[pname]
+            fn_m = re.search(r'(function_name\s*=\s*")([^"]+)(")', block_text)
+            if fn_m:
+                old_fn = fn_m.group(2)
+                new_block = block_text[:fn_m.start(2)] + new_fn + block_text[fn_m.end(2):]
+                rewritten = rewritten[:blk_start] + new_block + rewritten[blk_end + 1:]
+                print(
+                    f"  [AUTOFIX] Replaced function '{old_fn}' → '{new_fn}' in fgac_policy "
+                    f"'{pname}' (arg count mismatch)"
+                )
+            else:
+                remove_indices.append(idx)
+        else:
+            remove_indices.append(idx)
+
+    # Second pass: remove policies that couldn't be fixed.
+    # Re-find blocks since replacements may have shifted offsets slightly.
+    if remove_indices:
+        blocks2 = _find_brace_blocks(rewritten)
+        for idx in sorted(remove_indices, reverse=True):
+            if idx >= len(blocks2):
+                continue
+            blk_start, blk_end = blocks2[idx]
+            block_text = rewritten[blk_start:blk_end + 1]
+            end = blk_end + 1
+            while end < len(rewritten) and rewritten[end] in (",", " ", "\t"):
+                end += 1
+            start = blk_start
+            while start > 0 and rewritten[start - 1] in (" ", "\t"):
+                start -= 1
+            if start > 0 and rewritten[start - 1] == "\n":
+                start -= 1
+            pname_m = re.search(r'name\s*=\s*"([^"]+)"', block_text)
+            fn_m = re.search(r'function_name\s*=\s*"([^"]+)"', block_text)
+            pname = pname_m.group(1) if pname_m else "?"
+            fn_name = fn_m.group(1) if fn_m else "?"
+            rewritten = rewritten[:start] + rewritten[end:]
+            print(
+                f"  [AUTOFIX] Removed fgac_policy '{pname}' — function '{fn_name}' "
+                f"arg count does not match policy type"
+            )
+
+    text = text[:sec_start] + rewritten + text[sec_end:]
+    tfvars_path.write_text(text)
+    return len(bad_policies)
 
 
 def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None = None) -> int:
@@ -3884,6 +4060,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_fn_refs:
             print(f"  Auto-fixed: corrected {n_fn_refs} invalid function reference(s) in fgac_policies")
 
+        n_arg_mismatch = autofix_fgac_arg_count_mismatch(tfvars_path, sql_path if sql_block else None)
+        if n_arg_mismatch:
+            print(f"  Auto-fixed: removed {n_arg_mismatch} fgac_policy/ies with function arg count mismatch")
+
         n_cat_mismatch = autofix_function_category_mismatch(tfvars_path, sql_path if sql_block else None)
         if n_cat_mismatch:
             print(f"  Auto-fixed: corrected {n_cat_mismatch} function/category mismatch(es) in fgac_policies")
@@ -3911,6 +4091,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     autofix_fgac_policy_count(tfvars_path)
                     autofix_genie_config_fields(tfvars_path)
                     autofix_invalid_function_refs(tfvars_path, sql_path if sql_block else None)
+                    autofix_fgac_arg_count_mismatch(tfvars_path, sql_path if sql_block else None)
                     autofix_function_category_mismatch(tfvars_path, sql_path if sql_block else None)
                 if new_sql:
                     sql_block = new_sql
