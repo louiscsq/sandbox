@@ -81,9 +81,9 @@ See [Integration Testing](docs/integration-testing.md) for setup, credentials, s
 
 ## Documentation
 
-- [Playbook](docs/playbook.md) — all use cases: quickstart, ABAC-only, multi-space, existing spaces, promotion, decentralized governance, destroy
+- [Playbook](docs/playbook.md) — all use cases: quickstart, ABAC-only, multi-space, existing spaces, promotion, self-service Genie, destroy
 - [Architecture](docs/architecture.md) — layers, artifact ownership, config files, Genie Space lifecycle
-- [Decentralized Governance](docs/decentralized.md) — central ABAC team + independent BU Genie teams
+- [Central Governance, Self-Service Genie](docs/self-service-genie.md) — central ABAC team + BU teams self-serve Genie spaces
 - [CI/CD Integration](docs/cicd.md) — validate and deploy from a pipeline
 - [Troubleshooting](docs/troubleshooting.md) — imports, provider quirks, brownfield workflows
 - [Advanced Usage](docs/advanced.md) — IDP-synced groups, ABAC-only mode, masking UDF reuse, legacy migration

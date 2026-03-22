@@ -267,11 +267,11 @@ the next one starts.
 | **promote** | § 5 | Full dev → prod promotion with catalog remapping across both spaces |
 | **multi-env** | § 6 | Two independent envs on the same account: `dev` (Finance), `bu2` (Clinical) |
 | **attach-promote** | § 3 | Import a Genie Space already configured in the UI — govern it, then promote to prod |
-| **decentralized** | § 7 | Central governance team + two BU Genie teams; second BU isolation check; BU promote to prod via `apply-genie`; governance state verified unchanged throughout |
+| **self-service-genie** | § 7 | Central governance team + two BU Genie teams self-serve; second BU isolation check; BU promote to prod via `apply-genie`; governance state verified unchanged throughout |
 | **abac-only** | § 2 | ABAC governance only (no Genie Space) + §2→§4 upgrade path: add Genie Space later without disturbing governance |
 | **multi-space-import** | § 3 (multi-space) | Import two UI-configured Genie Spaces in one `make generate`; assert both configs present, Terraform creates no new spaces |
 | **attach-promote** | § 3 | Import a Genie Space already configured in the UI — discover its tables from the API, govern it, then promote to prod |
-| **decentralized** | § 7 | Central governance team applies ABAC via `apply-governance` (`MODE=governance`); separate BU team creates Genie space via `apply-genie` (`MODE=genie`); asserts no cross-layer state contamination |
+| **self-service-genie** | § 7 | Central governance team applies ABAC via `apply-governance` (`MODE=governance`); BU team self-serves Genie space via `apply-genie` (`MODE=genie`); asserts no cross-layer state contamination |
 | **schema-drift** | — | Detects and classifies new columns after initial ABAC deployment; tests `make audit-schema` and `make generate-delta` across ADD/DROP/RENAME COLUMN scenarios |
 
 ---
@@ -333,7 +333,7 @@ make test-per-space
 make test-promote
 make test-multi-env
 make test-attach-promote
-make test-decentralized
+make test-self-service-genie
 make test-abac-only
 make test-multi-space-import
 
@@ -544,9 +544,9 @@ by `make apply ENV=prod` applies the same governance to prod.
 
 ---
 
-### 8. decentralized — Central governance team + BU Genie teams
+### 8. self-service-genie — Central governance + BU teams self-serve Genie
 
-Validates the decentralized governance pattern from playbook.md § 7 and [decentralized.md](decentralized.md).
+Validates the self-service Genie pattern from playbook.md § 7 and [self-service-genie.md](self-service-genie.md).
 
 **Phase 1 — Governance team:**
 

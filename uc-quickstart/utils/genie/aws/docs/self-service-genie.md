@@ -1,8 +1,8 @@
-# Decentralized Governance
+# Central Governance, Self-Service Genie
 
-This document covers the decentralized operating model, where a central **Data Governance team** owns ABAC policies and groups, while independent **BU teams** create and manage their own Genie spaces.
+This document covers the self-service Genie operating model, where a central **Data Governance team** owns ABAC policies and groups, while independent **BU teams** self-serve their own Genie spaces.
 
-For the quick step-by-step, see [playbook.md §7](playbook.md#7-decentralized-governance). This document covers the reasoning, Git strategies, CI/CD integration, and FAQ.
+For the quick step-by-step, see [playbook.md §7](playbook.md#scenario-g-central-governance-self-service-genie). This document covers the reasoning, Git strategies, CI/CD integration, and FAQ.
 
 ---
 
@@ -14,7 +14,7 @@ For the quick step-by-step, see [playbook.md §7](playbook.md#7-decentralized-go
 | Central governance team + BU teams creating Genie spaces | `MODE=governance` / `apply-governance` + `MODE=genie` / `apply-genie` |
 | Two independent BU teams, each owning ABAC for their own catalogs | `make generate` per-BU + `abac_managed_catalogs` (see [advanced.md](advanced.md)) |
 
-Use the decentralized pattern when:
+Use the self-service Genie pattern when:
 
 - Your organization has a dedicated Data Governance or Data Platform team that standardizes access policies across the company.
 - Business units want self-service Genie space creation without needing governance expertise.
@@ -25,7 +25,7 @@ Use the decentralized pattern when:
 
 ## Architecture
 
-The three Terraform layers are already independent states. The decentralized mode exposes them as separate operational roles:
+The three Terraform layers are already independent states. The self-service Genie mode exposes them as separate operational roles:
 
 ```
 Account layer      →  Groups + Tag Policies
@@ -91,7 +91,7 @@ make destroy-genie ENV=<bu-env>         # tears down workspace layer only
 
 ## Least-privilege service principal for BU teams
 
-By default, the workspace layer looks up groups at the account level, which requires the SP to have Account Admin. In decentralized mode, BU teams can use a SP with **only workspace USER membership and the Databricks SQL access entitlement** by setting `genie_only = true`. No admin roles are needed.
+By default, the workspace layer looks up groups at the account level, which requires the SP to have Account Admin. In self-service Genie mode, BU teams can use a SP with **only workspace USER membership and the Databricks SQL access entitlement** by setting `genie_only = true`. No admin roles are needed.
 
 ### Setup
 
@@ -183,7 +183,7 @@ Governance team maintains a separate repo containing `envs/account/` and `envs/*
 
 ## CI/CD integration
 
-See [cicd.md](cicd.md) for general CI/CD setup. For decentralized mode:
+See [cicd.md](cicd.md) for general CI/CD setup. For self-service Genie mode:
 
 **Governance pipeline** (triggered by changes to `envs/account/` or `envs/*/data_access/`):
 ```yaml
@@ -199,7 +199,7 @@ Each pipeline only touches its own Terraform state files. The governance pipelin
 
 ---
 
-## Promotion in decentralized mode
+## Promotion in self-service Genie mode
 
 BU teams can promote their Genie spaces from dev to prod using a modified flow:
 
@@ -228,9 +228,9 @@ Yes — the group names are in `envs/account/abac.auto.tfvars`. In `genie` mode,
 
 **Can a BU team run `make apply` (full) instead of `make apply-genie`?**
 
-Yes — `make apply` applies all three layers. In decentralized mode this is safe if the BU env's `data_access/abac.auto.tfvars` only contains what the BU owns (e.g., just group lookups, no tag_assignments). However, `make apply-genie` is the recommended guard — it makes the role boundary explicit and prevents accidental ABAC changes.
+Yes — `make apply` applies all three layers. In self-service Genie mode this is safe if the BU env's `data_access/abac.auto.tfvars` only contains what the BU owns (e.g., just group lookups, no tag_assignments). However, `make apply-genie` is the recommended guard — it makes the role boundary explicit and prevents accidental ABAC changes.
 
-**What if we want to move from centralized to decentralized?**
+**What if we want to move from centralized to self-service Genie?**
 
 1. Identify which tables/catalogs the governance team will own.
 2. The governance team adopts the existing `data_access` Terraform state — no state migration needed.

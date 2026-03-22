@@ -18,7 +18,7 @@ DEST_CATALOG_MAP ?=
 # regenerated. Existing tuned config for other spaces is preserved.
 # Example: make generate SPACE="Finance Analytics"
 SPACE ?=
-# Optional: generation mode for decentralized deployments.
+# Optional: generation mode for self-service Genie deployments.
 # governance — generate ABAC only (groups, tags, policies, masking); no genie_space_configs
 # genie      — generate Genie space configs only (instructions, benchmarks, measures); no ABAC
 # (empty)    — full generation (default, current behavior)
@@ -157,7 +157,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 init-env: _bootstrap ## Prepare env directories and default config files
 	@echo "Environment bootstrap ready for $(ENV)."
 
-generate: _bootstrap _guard-workspace-target ## Run generate_abac.py in the selected workspace environment (set SPACE="Name" to regenerate only one space; set MODE=governance|genie for decentralized deployments)
+generate: _bootstrap _guard-workspace-target ## Run generate_abac.py in the selected workspace environment (set SPACE="Name" to regenerate only one space; set MODE=governance|genie for self-service Genie deployments)
 	@echo "=== Generate ABAC Config ($(ENV)$(if $(SPACE), — space: $(SPACE),)$(if $(MODE), — mode: $(MODE),)) ==="
 	@if [ -n "$(SPACE)" ]; then \
 		if [ ! -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
@@ -517,9 +517,9 @@ test-attach-promote: _bootstrap _guard-workspace-target ## Scenario: attach to U
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
-test-decentralized: _bootstrap _guard-workspace-target ## Scenario: central governance team applies ABAC, separate BU teams apply Genie spaces
+test-self-service-genie: _bootstrap _guard-workspace-target ## Scenario: central governance team applies ABAC, BU teams self-serve Genie spaces
 	cd "$(MODULE_ROOT)" && $(_ITEST_RUNNER) \
-		--scenario decentralized \
+		--scenario self-service-genie \
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 

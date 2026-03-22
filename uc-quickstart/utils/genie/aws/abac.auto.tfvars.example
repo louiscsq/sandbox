@@ -18,8 +18,8 @@
 #                                    Existing groups are auto-loaded from the account layer.
 #                                    Use with: make apply-genie ENV=<env>
 #
-# For the decentralized governance pattern (central ABAC team + independent BU Genie teams)
-# see docs/decentralized.md.
+# For the self-service Genie pattern (central ABAC team + BU teams self-serve Genie spaces)
+# see docs/self-service-genie.md.
 #
 # ============================================================================
 # `make generate` writes a full draft into `envs/<env>/generated/abac.auto.tfvars`.

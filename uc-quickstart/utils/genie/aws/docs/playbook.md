@@ -14,7 +14,7 @@ This document covers the main use cases for deploying and managing Genie Spaces 
 | [D. Add a Genie Space](#scenario-d-add-a-new-genie-space-incremental) | Add a second space without re-generating existing ones | `make generate SPACE="Space B"` → `make apply` |
 | [E. Promote dev → prod](#scenario-e-promote-dev--prod) | Replicate dev governance to prod with renamed catalogs | `make promote` → `make apply ENV=prod` |
 | [F. Independent BU environment](#scenario-f-create-an-independent-bu-environment) | BU needs its own groups, governance, and Genie spaces | `make setup ENV=bu2` → `make generate ENV=bu2` → `make apply ENV=bu2` |
-| [G. Decentralized governance](#scenario-g-decentralized-governance) | Central ABAC team + independent BU Genie teams | `make generate MODE=governance` / `make generate MODE=genie` |
+| [G. Central governance, self-service Genie](#scenario-g-central-governance-self-service-genie) | Central ABAC team + BU teams self-serve Genie spaces | `make generate MODE=governance` / `make generate MODE=genie` |
 
 ### How layers are applied
 
@@ -84,7 +84,7 @@ Each entry in `genie_spaces` operates in one of two modes based on whether `geni
 | **empty** (default) | Creates and fully manages the space: title, benchmarks, instructions, group ACLs, full lifecycle. Requires `uc_tables`. |
 | **set** | Attaches to the existing space. Never creates or deletes it. ABAC governance and group ACLs are applied. Tables are discovered automatically from the Genie API, or supplied via `uc_tables` if auto-discovery is not yet available. |
 
-> **Note:** This is a per-space setting in `env.auto.tfvars` and is separate from the `MODE=` flag for `make generate`, which controls [team responsibility separation](decentralized.md).
+> **Note:** This is a per-space setting in `env.auto.tfvars` and is separate from the `MODE=` flag for `make generate`, which controls [team responsibility separation](self-service-genie.md).
 
 ### Multiple Genie Spaces and multiple catalogs
 
@@ -462,11 +462,11 @@ make apply ENV=bu2
 
 ---
 
-## Scenario G: Decentralized governance
+## Scenario G: Central governance, self-service Genie
 
-Use this when a **central Data Governance team** owns ABAC policies, groups, and masking functions, while **independent BU teams** create and manage their own Genie spaces.
+Use this when a **central Data Governance team** owns ABAC policies, groups, and masking functions, while **BU teams self-serve their own Genie spaces**.
 
-> For the full reference guide including Git strategies, CI/CD integration, and FAQ, see [`docs/decentralized.md`](decentralized.md).
+> For the full reference guide including Git strategies, CI/CD integration, and FAQ, see [`docs/self-service-genie.md`](self-service-genie.md).
 
 ### Who owns what
 
@@ -526,7 +526,7 @@ make apply-genie ENV=bu1
 # With genie_only = true: also skips group lookup, workspace assignment, entitlements
 ```
 
-> **Least privilege:** When `genie_only = true`, the BU team's SP only needs **workspace USER** membership and the **Databricks SQL access** entitlement — no admin roles at all. The governance team must grant the BU SP `CAN USE` on a warehouse, plus `USE CATALOG`, `USE SCHEMA`, and `SELECT` on the referenced tables (the Genie API validates table access at space creation). `sql_warehouse_id` is required (BYO warehouse). Groups must be empty in `abac.auto.tfvars` — the governance team manages group assignments separately. See [Decentralized Governance — Least-Privilege SP](decentralized.md#least-privilege-service-principal-for-bu-teams).
+> **Least privilege:** When `genie_only = true`, the BU team's SP only needs **workspace USER** membership and the **Databricks SQL access** entitlement — no admin roles at all. The governance team must grant the BU SP `CAN USE` on a warehouse, plus `USE CATALOG`, `USE SCHEMA`, and `SELECT` on the referenced tables (the Genie API validates table access at space creation). `sql_warehouse_id` is required (BYO warehouse). Groups must be empty in `abac.auto.tfvars` — the governance team manages group assignments separately. See [Self-Service Genie — Least-Privilege SP](self-service-genie.md#least-privilege-service-principal-for-bu-teams).
 
 ### Adding a second BU
 
@@ -559,7 +559,7 @@ make destroy ENV=account
 make destroy ENV=dev
 make destroy ENV=prod
 
-# Decentralized-mode targeted destroys:
+# Self-service Genie targeted destroys:
 make destroy-genie ENV=bu1        # workspace layer only
 make destroy-governance ENV=governance  # data_access layer only
 

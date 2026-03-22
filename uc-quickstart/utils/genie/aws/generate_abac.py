@@ -3560,7 +3560,7 @@ def main():
         choices=["full", "governance", "genie"],
         default="full",
         help=(
-            "Generation mode for decentralized deployments (default: full). "
+            "Generation mode for self-service Genie deployments (default: full). "
             "governance — generate ABAC only (groups, tag policies, tag assignments, "
             "FGAC policies, masking functions); genie_space_configs is suppressed. "
             "Use this for the central Data Governance team. "

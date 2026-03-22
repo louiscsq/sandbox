@@ -87,7 +87,7 @@ In this mode:
 
 This mode is **integration tested** with a minimal-privilege SP (see `make test-genie-only`). The test creates a dedicated SP with only workspace USER + SQL entitlement (no admin roles), grants it CAN USE on a warehouse and UC table access, and verifies Genie Space creation succeeds with zero account-level resources in Terraform state.
 
-See [Decentralized Governance](docs/decentralized.md) for the full setup guide.
+See [Central Governance, Self-Service Genie](docs/self-service-genie.md) for the full setup guide.
 
 ## Summary checklist
 

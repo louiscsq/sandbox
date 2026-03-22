@@ -252,7 +252,7 @@ resource "null_resource" "genie_space_config" {
 # ── New spaces: apply ACLs ────────────────────────────────────────────────────
 
 resource "null_resource" "genie_space_acls_created" {
-  # Skip ACL setup when no groups are configured (e.g. decentralized genie-only mode
+  # Skip ACL setup when no groups are configured (e.g. self-service genie-only mode
   # where groups are managed by the governance team in a separate environment).
   for_each = local.genie_groups_csv != "" ? local.new_spaces : {}
 

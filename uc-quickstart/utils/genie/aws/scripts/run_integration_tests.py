@@ -37,7 +37,8 @@ Scenarios
                    ABAC governance. Finally promotes to prod. Tests playbook.md §3
                    "Attaching to an existing Genie Space" + §3a promotion.
 
-  decentralized    Central Data Governance team + independent BU Genie teams.
+  self-service-genie
+                   Central Data Governance team + BU teams self-serve Genie spaces.
                    Phase 1: governance env applies ABAC (MODE=governance + apply-governance).
                    Phase 2: bu_fin env creates Finance Analytics (MODE=genie + apply-genie).
                    Phase 3: bu_clin (second BU) added; governance state verified unchanged.
@@ -86,7 +87,7 @@ Makefile targets (added by this PR)
   make test-promote
   make test-multi-env
   make test-attach-promote
-  make test-decentralized
+  make test-self-service-genie
   make test-abac-only
   make test-multi-space-import
   make test-all
@@ -2318,13 +2319,13 @@ genie_spaces = [
     print(f"\n  {_green(_bold('PASSED'))}  attach-promote")
 
 
-def scenario_decentralized(
+def scenario_self_service_genie(
     auth_file: Path,
     warehouse_id: str = "",
     keep_data: bool = False,
     fresh_env: bool = False,
 ) -> None:
-    """Decentralized governance: central ABAC team + independent BU Genie teams.
+    """Central governance, self-service Genie: central ABAC team + BU teams self-serve Genie spaces.
 
     Phase 1 — Governance team:
       Creates a 'governance' env that governs both dev_fin + dev_clinical catalogs.
@@ -2352,11 +2353,11 @@ def scenario_decentralized(
       Then runs `make apply-genie ENV=bu_fin_prod` (NOT make apply) — applies workspace only.
       Asserts bu_fin_prod has .genie_space_id_* but no data_access/terraform.tfstate.
       Asserts governance state is unmodified throughout.
-      Tests the BU-team prod-promotion pattern from docs/decentralized.md.
+      Tests the BU-team prod-promotion pattern from docs/self-service-genie.md.
 
-    Tests: playbook.md §7 "Decentralized governance" and docs/decentralized.md.
+    Tests: playbook.md §7 "Central governance, self-service Genie" and docs/self-service-genie.md.
     """
-    _banner("Scenario: decentralized — Central governance team + BU Genie teams")
+    _banner("Scenario: self-service-genie — Central governance + BU teams self-serve Genie")
     gov_env     = "governance"
     bu_env      = "bu_fin"
     bu_clin_env = "bu_clin"
@@ -2577,7 +2578,7 @@ uc_tables = [
         _try_destroy(gov_env)
         _try_destroy_account()
 
-    print(f"\n  {_green(_bold('PASSED'))}  decentralized")
+    print(f"\n  {_green(_bold('PASSED'))}  self-service-genie")
 
 
 # ---------------------------------------------------------------------------
@@ -3223,7 +3224,7 @@ SCENARIOS: dict[str, tuple[str, Callable]] = {
     "promote":              ("Multi-space dev → prod promotion",                                  scenario_promote),
     "multi-env":            ("Two independent envs (dev Finance, bu2 Clinical)",                  scenario_multi_env),
     "attach-promote":       ("Attach to UI-created space (API discovery) + promote",              scenario_attach_and_promote),
-    "decentralized":        ("Central governance team (MODE=governance) + BU Genie teams (MODE=genie)", scenario_decentralized),
+    "self-service-genie":   ("Central governance + BU teams self-serve Genie (MODE=governance/genie)", scenario_self_service_genie),
     "abac-only":            ("ABAC governance only (no Genie Space) + upgrade to Genie",         scenario_abac_only),
     "multi-space-import":   ("Import two UI-created Genie Spaces in one make generate",          scenario_multi_space_import),
     "quickstart":      ("Single space, single catalog (Finance/dev_fin)",                    scenario_quickstart),
@@ -3233,7 +3234,7 @@ SCENARIOS: dict[str, tuple[str, Callable]] = {
     "promote":         ("Multi-space dev → prod promotion",                                  scenario_promote),
     "multi-env":       ("Two independent envs (dev Finance, bu2 Clinical)",                  scenario_multi_env),
     "attach-promote":  ("Attach to UI-created space (API discovery) + promote",              scenario_attach_and_promote),
-    "decentralized":   ("Central governance team (MODE=governance) + BU Genie team (MODE=genie)", scenario_decentralized),
+    "self-service-genie": ("Central governance + BU teams self-serve Genie (MODE=governance/genie)", scenario_self_service_genie),
     "schema-drift":    ("Column tag drift detection after ADD/DROP/RENAME COLUMN",           scenario_schema_drift),
     "genie-only":      ("Genie-only mode (genie_only=true, no account-level resources)",    scenario_genie_only),
 }

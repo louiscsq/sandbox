@@ -18,7 +18,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   BYO warehouse (`sql_warehouse_id`) is required in this mode.
 - **UC table grant documentation**: `genie_only` mode requires explicit
   `USE CATALOG`, `USE SCHEMA`, `SELECT`, and `CAN USE` warehouse grants from
-  the governance team. Updated GENIE_SPACE_PERMISSIONS.md, decentralized.md,
+  the governance team. Updated GENIE_SPACE_PERMISSIONS.md, self-service-genie.md,
   and README.md.
 
 ## [0.2.0] - 2026-03-12

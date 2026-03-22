@@ -56,7 +56,7 @@ If you have pre-existing masking SQL UDFs, the tool can incorporate them:
 
 ## Multi-Environment File Layout
 
-For day-to-day workflows (promote, independent BU, decentralized) see [playbook.md](playbook.md). This section documents the directory structure those workflows produce.
+For day-to-day workflows (promote, independent BU, self-service Genie) see [playbook.md](playbook.md). This section documents the directory structure those workflows produce.
 
 Workspace environment names can be anything: `dev`, `staging`, `prod`, `bu2`, or something business-unit-specific. `account` and `data_access` are reserved names.
 

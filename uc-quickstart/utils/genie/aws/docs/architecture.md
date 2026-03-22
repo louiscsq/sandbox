@@ -12,9 +12,9 @@ The quickstart edits files in `envs/<env>/`, while Terraform itself runs from fi
 | Data access | `envs/<env>/data_access/` | Env-scoped tag assignments, masking functions, FGAC policies, catalog grants | Account tag policy definitions, workspace entitlements, Genie lifecycle |
 | Workspace | `envs/<env>/` | Workspace assignment, entitlements, optional warehouse, optional Genie Space and ACLs | Account groups, tag policies, FGAC policies |
 
-### Decentralized operating mode
+### Self-service Genie operating mode
 
-The layers are designed so that different teams can own different layers independently. In decentralized deployments, a central Data Governance team owns the account + data_access layers while BU teams own only their workspace layers. See [decentralized.md](decentralized.md) for the full guide and CI/CD integration patterns.
+The layers are designed so that different teams can own different layers independently. In self-service Genie deployments, a central Data Governance team owns the account + data_access layers while BU teams own only their workspace layers. See [self-service-genie.md](self-service-genie.md) for the full guide and CI/CD integration patterns.
 
 ## Directory Contract
 
