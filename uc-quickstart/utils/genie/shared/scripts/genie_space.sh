@@ -125,9 +125,15 @@ resolve_token() {
 
 # ---------- Read sql_warehouse_id from env.auto.tfvars (fallback) ----------
 read_warehouse_from_tfvars() {
-  local script_dir
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  local tfvars="${script_dir}/../env.auto.tfvars"
+  # Try ENV_DIR first (set by Makefile), then fall back to script-relative path.
+  local tfvars=""
+  if [[ -n "${ENV_DIR:-}" && -f "${ENV_DIR}/env.auto.tfvars" ]]; then
+    tfvars="${ENV_DIR}/env.auto.tfvars"
+  else
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    tfvars="${script_dir}/../env.auto.tfvars"
+  fi
   if [[ -f "$tfvars" ]]; then
     grep -E '^\s*sql_warehouse_id\s*=' "$tfvars" \
       | sed 's/.*=\s*"\(.*\)".*/\1/' \

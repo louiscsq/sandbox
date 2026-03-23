@@ -1,10 +1,11 @@
-# GenieRails
+# GenieRails — Azure
 
 Put Genie onboarding on rails — with built-in guardrails. GenieRails generates ABAC governance, masking functions, and Genie Spaces from a small set of input files so you can get business users into Genie quickly without editing Terraform.
 
 ## Prerequisites
 
 - Tables must already exist in Unity Catalog before running `make generate`
+- An Azure Databricks workspace with Unity Catalog enabled
 - A Databricks service principal with these roles:
 
 
@@ -15,6 +16,7 @@ Put Genie onboarding on rails — with built-in guardrails. GenieRails generates
 | Full (default) | **Metastore Admin** | Create tag policies, FGAC policies, grants, and masking functions |
 | Genie-only | **Workspace USER** + **Databricks SQL access** entitlement | Create Genie Spaces only — set `genie_only = true` and provide `sql_warehouse_id` in `env.auto.tfvars`. Also requires `CAN USE` on the warehouse and UC table access (`USE CATALOG`, `USE SCHEMA`, `SELECT`) granted by the governance team. No admin roles needed. |
 
+For Azure-specific resource setup (Azure AD App Registration, RBAC roles, storage accounts), see [Azure Prerequisites](docs/azure-prerequisites.md).
 
 ## Quickstart
 
@@ -29,6 +31,21 @@ vi envs/dev/generated/masking_functions.sql  # review AI-generated masking and r
 make validate-generated
 make apply
 ```
+
+### `auth.auto.tfvars` — Azure format
+
+```hcl
+databricks_account_id     = "your-account-id"
+databricks_account_host   = "https://accounts.azuredatabricks.net"
+databricks_client_id      = "your-sp-client-id"
+databricks_client_secret  = "your-sp-secret"
+databricks_workspace_id   = "your-workspace-id"
+databricks_workspace_host = "https://adb-1234567890.12.azuredatabricks.net"
+```
+
+Note: Two URLs differ from AWS and must be set explicitly:
+- `databricks_account_host` — required for Azure (`accounts.azuredatabricks.net`); the Terraform default is the AWS URL
+- `databricks_workspace_host` — Azure uses `adb-<workspace-id>.<region-id>.azuredatabricks.net`
 
 ### `env.auto.tfvars` — minimal example
 
@@ -77,19 +94,28 @@ make test-unit   # unit tests — ~1 second, no credentials required
 make test-ci     # full CI pipeline: provision → integration tests → teardown
 ```
 
-See [Integration Testing](docs/integration-testing.md) for setup, credentials, scenarios, and troubleshooting.
+For integration tests, configure Azure credentials:
+
+```bash
+cp ../shared/scripts/account-admin.env.example ../shared/scripts/account-admin.env
+# Edit: set CLOUD_PROVIDER=azure and fill in Azure + Databricks credentials
+```
+
+See [Integration Testing](../shared/docs/integration-testing.md) for setup, credentials, scenarios, and troubleshooting.
 
 ## Multi-Cloud Architecture
 
-GenieRails uses a shared module architecture. All Terraform modules, scripts, and Python tools live in `../shared/`. This `aws/` directory is a thin cloud-specific wrapper containing only:
-- `Makefile` — sets `CLOUD=aws` and includes `../shared/Makefile.shared`
-- `envs/` — AWS environment configs
-- `.github/workflows/` — AWS-specific CI (S3 state backend)
+GenieRails uses a shared module architecture. All Terraform modules, scripts, and Python tools live in `../shared/`. This `azure/` directory is a thin cloud-specific wrapper containing only:
+- `Makefile` — sets `CLOUD=azure` and includes `../shared/Makefile.shared`
+- `envs/` — Azure environment configs
+- `.github/workflows/` — Azure-specific CI (Azure Blob Storage state backend)
+- `docs/` — Azure-specific prerequisites and setup
 
-For Azure, see [`../azure/`](../azure/README.md).
+For AWS, see [`../aws/`](../aws/README.md).
 
 ## Documentation
 
+- [Azure Prerequisites](docs/azure-prerequisites.md) — Azure-specific resource setup, RBAC roles, storage accounts
 - [Playbook](../shared/docs/playbook.md) — all use cases: quickstart, ABAC-only, multi-space, existing spaces, promotion, self-service Genie, destroy
 - [Architecture](../shared/docs/architecture.md) — layers, artifact ownership, config files, Genie Space lifecycle
 - [Central Governance, Self-Service Genie](../shared/docs/self-service-genie.md) — central ABAC team + BU teams self-serve Genie spaces
@@ -103,4 +129,3 @@ For Azure, see [`../azure/`](../azure/README.md).
 - Genie Workbench integration
 - Telemetry enablement
 - Full schema evolution support
-

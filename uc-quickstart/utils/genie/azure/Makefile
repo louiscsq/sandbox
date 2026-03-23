@@ -1,5 +1,5 @@
-# aws/Makefile — thin cloud-specific wrapper
-CLOUD      := aws
+# azure/Makefile — thin cloud-specific wrapper
+CLOUD      := azure
 CLOUD_ROOT := $(shell pwd)
 SHARED_ROOT := $(CLOUD_ROOT)/../shared
 

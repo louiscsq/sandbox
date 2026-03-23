@@ -140,8 +140,9 @@ if not account_id:
 
 try:
     from databricks.sdk import AccountClient
+    account_host = _str(auth.get('databricks_account_host', '')) or 'https://accounts.cloud.databricks.com'
     a = AccountClient(
-        host='https://accounts.cloud.databricks.com',
+        host=account_host,
         account_id=account_id,
         client_id=client_id,
         client_secret=client_secret,
@@ -151,7 +152,7 @@ try:
     _ctx = _ssl.create_default_context()
     _ctx.check_hostname = False
     _ctx.verify_mode = _ssl.CERT_NONE
-    base = f'https://accounts.cloud.databricks.com/api/2.0/accounts/{account_id}'
+    base = f'{account_host}/api/2.0/accounts/{account_id}'
     for name in group_names:
         try:
             q = urllib.parse.quote(f'displayName eq "{name}"')

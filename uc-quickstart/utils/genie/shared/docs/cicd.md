@@ -135,17 +135,29 @@ Use this for separate business units or environments that should not inherit `de
 
 ## Ready-to-Use GitHub Actions Workflows
 
-Template workflows are included at `.github/workflows/` inside this folder:
+Template workflows are included at `.github/workflows/` inside each cloud wrapper (`aws/` and `azure/`):
 
 - `validate.yml` — runs `make validate` on every pull request; no Databricks credentials needed.
-- `deploy.yml` — runs `make apply` on merge to `main`; writes `auth.auto.tfvars` from GitHub Secrets and syncs Terraform state from/to S3.
+- `deploy.yml` — runs `make apply` on merge to `main`; writes `auth.auto.tfvars` from GitHub Secrets and syncs Terraform state.
+
+### AWS (`aws/.github/workflows/`)
+- Uses `aws-actions/configure-aws-credentials@v4` for S3 state backend
+- State stored at `s3://<TF_STATE_BUCKET>/genie-aws/envs/...`
+
+### Azure (`azure/.github/workflows/`)
+- Uses `azure/login@v2` with OIDC federated credentials for Azure Blob Storage state backend
+- State stored at `https://<TF_STATE_STORAGE_ACCOUNT>.blob.core.windows.net/<TF_STATE_CONTAINER>/genie-azure/envs/...`
 
 Because GitHub Actions workflows must live at `.github/workflows/` **at the repository root**, you need to copy them there to activate them:
 
 ```bash
-# From the repository root:
+# From the repository root (AWS):
 cp -r uc-quickstart/utils/genie/aws/.github/workflows/validate.yml .github/workflows/genie-aws-validate.yml
 cp -r uc-quickstart/utils/genie/aws/.github/workflows/deploy.yml   .github/workflows/genie-aws-deploy.yml
+
+# Azure:
+cp -r uc-quickstart/utils/genie/azure/.github/workflows/validate.yml .github/workflows/genie-azure-validate.yml
+cp -r uc-quickstart/utils/genie/azure/.github/workflows/deploy.yml   .github/workflows/genie-azure-deploy.yml
 ```
 
 If this folder is later promoted to its own top-level repository, the workflows are ready as-is — place `.github/workflows/` at the new repo root and they will activate without modification.

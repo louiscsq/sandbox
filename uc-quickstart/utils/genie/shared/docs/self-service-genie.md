@@ -113,7 +113,7 @@ By default, the workspace layer looks up groups at the account level, which requ
    databricks_client_id     = "<bu-sp-client-id>"
    databricks_client_secret = "<bu-sp-secret>"
    databricks_workspace_id  = "<workspace-id>"
-   databricks_workspace_host = "https://<workspace>.cloud.databricks.com/"
+   databricks_workspace_host = "https://<workspace>.cloud.databricks.com/"  # or https://adb-<id>.<region>.azuredatabricks.net for Azure
    ```
 
 5. Set `genie_only = true` in `envs/<bu-env>/env.auto.tfvars`:

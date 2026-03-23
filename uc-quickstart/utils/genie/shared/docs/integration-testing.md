@@ -20,8 +20,7 @@ This single command runs the full pipeline in order:
 
 1. **Unit tests** — fast Python-only checks, no cloud resources needed
 2. **Provision** — fresh isolated Databricks workspace + metastore (~10–15 min)
-3. **Integration tests** — all 10 scenarios (~120 min)
-3. **Integration tests** — all 9 scenarios (~90 min)
+3. **Integration tests** — all 11 scenarios (~90 min)
 4. **Teardown** — always runs, even if tests fail, so no cloud resources are left behind
 
 Exit code is non-zero if any phase fails. Teardown is **always** executed.
@@ -129,23 +128,59 @@ writes all `auth.auto.tfvars` files so the test runner uses that environment.
 cp scripts/account-admin.env.example scripts/account-admin.env
 ```
 
-Fill in `scripts/account-admin.env`:
+Fill in `scripts/account-admin.env`. The file has three sections — shared Databricks credentials, a cloud provider selector, and cloud-specific credentials. Fill in sections 1 and 2, then only the section that matches your cloud provider.
+
+#### Section 1 — Databricks credentials (both clouds)
 
 | Key | Where to find it |
 |---|---|
 | `DATABRICKS_ACCOUNT_ID` | Account Console → top-right menu → Account ID |
 | `DATABRICKS_CLIENT_ID` | Account Console → User Management → Service Principals → `<SP>` → Application ID |
 | `DATABRICKS_CLIENT_SECRET` | Same SP → OAuth Secrets → Generate Secret |
-| `DATABRICKS_AWS_REGION` | AWS region for the new workspace (e.g. `ap-southeast-2`) |
-| `AWS_ACCESS_KEY_ID` | AWS credentials with IAM write permissions (see below) |
-| `AWS_SECRET_ACCESS_KEY` | — |
-| `AWS_SESSION_TOKEN` | Only needed for temporary STS credentials (see note below) |
 
-#### S3 bucket (auto-created)
+> **Note:** The Account Console URL differs by cloud:
+> - AWS: `https://accounts.cloud.databricks.com`
+> - Azure: `https://accounts.azuredatabricks.net`
+
+#### Section 2 — Cloud provider
+
+Set `CLOUD_PROVIDER` to `aws` or `azure`, then fill in **only** the matching section below.
+
+---
+
+#### Section 3a — AWS credentials (skip if `CLOUD_PROVIDER=azure`)
+
+| Key | Where to find it |
+|---|---|
+| `DATABRICKS_AWS_REGION` | AWS region for the new workspace (e.g. `ap-southeast-2`) |
+| `AWS_ACCESS_KEY_ID` | AWS credentials with IAM + S3 write permissions (see below) |
+| `AWS_SECRET_ACCESS_KEY` | Same IAM user or role |
+| `AWS_SESSION_TOKEN` | Only needed for temporary STS credentials (see recommendation below) |
+
+**AWS credential type recommendation:**
+
+> **Use long-lived IAM user credentials** (`AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, no `AWS_SESSION_TOKEN`) whenever possible. Temporary STS tokens expire after 1–12 hours, which can cause teardown to fail if the full test run (~90 min + review time) outlasts the token lifetime.
+
+| Credential type | `AWS_SESSION_TOKEN` required | Expires | Recommended for |
+|---|---|---|---|
+| IAM user access keys | No | Never | **Local dev and CI/CD** |
+| AWS SSO / `aws sso login` | Yes (auto-set by CLI) | 1–8 h | Interactive use only |
+| STS `AssumeRole` | Yes | 15 min – 12 h | Short-lived pipelines |
+
+**Required IAM permissions:**
+
+`iam:CreateRole`, `iam:DeleteRole`, `iam:PutRolePolicy`, `iam:DeleteRolePolicy`,
+`iam:ListRolePolicies`, `iam:ListAttachedRolePolicies`, `iam:DetachRolePolicy`,
+`iam:UpdateAssumeRolePolicy`, `sts:GetCallerIdentity`
+
+**Required S3 permissions:**
+
+`s3:CreateBucket`, `s3:DeleteBucket`, `s3:PutPublicAccessBlock`,
+`s3:ListBucketVersions`, `s3:DeleteObject`, `s3:DeleteObjectVersion`
+
+**Auto-created AWS resources:**
 
 The provision script auto-creates an S3 bucket named `genie-uc-test-<aws-account-id>` in the configured region. The bucket is reused across test runs and only deleted on teardown if the script created it.
-
-How the bucket is used during a test run:
 
 | Step | What the script creates |
 |---|---|
@@ -156,33 +191,58 @@ How the bucket is used during a test run:
 | Integration tests | Each catalog gets its own subfolder: `.../genie-test-<run-id>/<catalog-name>/` |
 | `teardown` | Deletes the IAM role; the metastore deletion cascades to catalogs/schemas/policies |
 
-The **S3 objects** (actual data files) written during the test are **not deleted by teardown** —
-the metastore and workspace are destroyed at the Databricks layer, but the underlying S3 prefixes
-remain.  They are cheap (a few MB of small Delta files) and isolated by `run-id`, so they
-accumulate over time.  Clean them up periodically with:
+S3 objects written during the test are **not deleted by teardown** — the metastore and workspace are destroyed at the Databricks layer, but the underlying S3 prefixes remain. They are cheap (a few MB of small Delta files) and isolated by `run-id`. Clean them up periodically with:
 
 ```bash
 aws s3 rm s3://<your-bucket>/ --recursive --exclude "*" --include "genie-test-*"
 ```
 
-> **Note:** The auto-created bucket (`genie-uc-test-<aws-account-id>`) is dedicated to
-> testing. The provision script creates IAM roles with `s3:GetObject`, `s3:PutObject`,
-> `s3:DeleteObject` scoped to the test prefix inside it.
+---
 
-#### AWS credential type recommendation
+#### Section 3b — Azure credentials (skip if `CLOUD_PROVIDER=aws`)
 
-> **Use long-lived IAM user credentials** (`AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, no `AWS_SESSION_TOKEN`) whenever possible. Temporary STS tokens expire after 1–12 hours, which can cause teardown to fail if the full test run (~90 min + review time) outlasts the token lifetime.
+| Key | Where to find it |
+|---|---|
+| `AZURE_SUBSCRIPTION_ID` | Azure Portal → Subscriptions → Subscription ID |
+| `AZURE_RESOURCE_GROUP` | Azure Portal → Resource Groups → name (must already exist) |
+| `AZURE_REGION` | Must match the workspace region (e.g. `eastus2`, `australiaeast`, `westeurope`) |
+| `AZURE_TENANT_ID` | Azure Portal → Microsoft Entra ID → Overview → Tenant ID |
+| `AZURE_CLIENT_ID` | Azure Portal → Microsoft Entra ID → App registrations → Application (client) ID |
+| `AZURE_CLIENT_SECRET` | Same App registration → Certificates & secrets → New client secret |
 
-| Credential type | `AWS_SESSION_TOKEN` required | Expires | Recommended for |
-|---|---|---|---|
-| IAM user access keys | No | Never | **Local dev and CI/CD** |
-| AWS SSO / `aws sso login` | Yes (auto-set by CLI) | 1–8 h | Interactive use only |
-| STS `AssumeRole` | Yes | 15 min – 12 h | Short-lived pipelines |
+> **Note:** Azure client secrets expire (default 6 months or 2 years). If teardown fails with an auth error, generate a new secret and re-run.
 
-Required IAM permissions for the credentials:
-`iam:CreateRole`, `iam:DeleteRole`, `iam:PutRolePolicy`, `iam:DeleteRolePolicy`,
-`iam:ListRolePolicies`, `iam:ListAttachedRolePolicies`, `iam:DetachRolePolicy`,
-`iam:UpdateAssumeRolePolicy`, `sts:GetCallerIdentity`
+**Required Azure RBAC roles on the resource group:**
+
+| Role | Why it's needed |
+|---|---|
+| `Contributor` | Create/delete storage accounts, access connectors |
+| `Storage Blob Data Contributor` | Manage blob data in ADLS Gen2 containers |
+| `User Access Administrator` (optional) | Assign managed-identity roles; if absent, the script falls back to your local `az login` for role assignments |
+
+Assign roles with:
+
+```bash
+az role assignment create \
+  --assignee <AZURE_CLIENT_ID> \
+  --role "Contributor" \
+  --scope "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>"
+
+az role assignment create \
+  --assignee <AZURE_CLIENT_ID> \
+  --role "Storage Blob Data Contributor" \
+  --scope "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>"
+```
+
+**Auto-created Azure resources:**
+
+| Step | What the script creates |
+|---|---|
+| `provision` | An **ADLS Gen2 storage account** (`genietest<run-id>`) with a blob container |
+| `provision` | A **Databricks Access Connector** with a managed identity |
+| `provision` | A Databricks **storage credential** backed by the Access Connector |
+| `provision` | A Databricks **External Location** pointing to the ADLS container |
+| `teardown` | Deletes all Azure resources (storage account, access connector, role assignments) |
 
 ### Provision
 
@@ -193,10 +253,12 @@ python scripts/provision_test_env.py provision
 This will:
 
 1. Look up the SP's SCIM identity in the Databricks account.
-2. Create a **serverless workspace** (`genie-test-<id>`) — no VPC/S3/IAM required.
-3. Create a fresh **Unity Catalog metastore** with a unique storage path inside your S3 bucket.
+2. Create a **serverless workspace** (`genie-test-<id>`).
+3. Create a fresh **Unity Catalog metastore** with a unique storage path.
 4. Assign the metastore to the workspace.
-5. Create an **AWS IAM role** scoped to the test S3 prefix and register it as a storage credential.
+5. Create cloud-specific storage infrastructure:
+   - **AWS:** An IAM role scoped to the test S3 prefix, registered as a storage credential
+   - **Azure:** An ADLS Gen2 storage account + Access Connector with managed identity, registered as a storage credential
 6. Create an **External Location** so catalogs can be created without a metastore root.
 7. Set the SP as **metastore admin** and **workspace admin**.
 8. Write `auth.auto.tfvars` for all env directories (`dev`, `bu2`, `prod`, `account`).
@@ -223,12 +285,14 @@ python scripts/run_integration_tests.py --scenario quickstart
 python scripts/provision_test_env.py teardown
 ```
 
-This deletes the IAM role, workspace, metastore (and all catalogs/schemas/policies inside
-it), admin group, and removes the generated `auth.auto.tfvars` files.
+This deletes cloud-specific resources, the workspace, metastore (and all catalogs/schemas/policies inside it), admin group, and removes the generated `auth.auto.tfvars` files.
 
-> **If teardown reports "ExpiredToken" for the IAM role deletion:** your AWS session token
-> expired during the test run. Export fresh credentials in your shell, then re-run teardown —
-> the script reads current environment variables in preference to the file:
+- **AWS:** Deletes the IAM role created during provisioning. S3 objects remain (see cleanup note above).
+- **Azure:** Deletes the storage account, access connector, and any role assignments.
+
+> **If teardown fails with an auth error:**
+>
+> *AWS — "ExpiredToken":* Your STS session token expired during the test run. Export fresh credentials and re-run:
 >
 > ```bash
 > export AWS_ACCESS_KEY_ID=...
@@ -237,9 +301,10 @@ it), admin group, and removes the generated `auth.auto.tfvars` files.
 > python scripts/provision_test_env.py teardown
 > ```
 >
-> Alternatively, delete the role manually: **AWS Console → IAM → Roles → search for `genie-test-uc-role-*`**.
+> *Azure — "ClientSecretExpired" or "InvalidAuthenticationToken":* Your Azure client secret has expired. Generate a new secret in the Azure Portal (Microsoft Entra ID → App registrations → Certificates & secrets), update `account-admin.env`, and re-run teardown.
+>
 > The Databricks workspace and metastore are always deleted by teardown regardless of whether
-> the IAM role deletion succeeds.
+> the cloud resource cleanup succeeds.
 
 ### Options
 
@@ -270,8 +335,6 @@ the next one starts.
 | **self-service-genie** | § 7 | Central governance team + two BU Genie teams self-serve; second BU isolation check; BU promote to prod via `apply-genie`; governance state verified unchanged throughout |
 | **abac-only** | § 2 | ABAC governance only (no Genie Space) + §2→§4 upgrade path: add Genie Space later without disturbing governance |
 | **multi-space-import** | § 3 (multi-space) | Import two UI-configured Genie Spaces in one `make generate`; assert both configs present, Terraform creates no new spaces |
-| **attach-promote** | § 3 | Import a Genie Space already configured in the UI — discover its tables from the API, govern it, then promote to prod |
-| **self-service-genie** | § 7 | Central governance team applies ABAC via `apply-governance` (`MODE=governance`); BU team self-serves Genie space via `apply-genie` (`MODE=genie`); asserts no cross-layer state contamination |
 | **schema-drift** | — | Detects and classifies new columns after initial ABAC deployment; tests `make audit-schema` and `make generate-delta` across ADD/DROP/RENAME COLUMN scenarios |
 
 ---
@@ -702,7 +765,7 @@ Tags are unset on `email`, then `ALTER TABLE RENAME COLUMN email TO contact_emai
 
 ## Using `setup_test_data.py` Standalone
 
-Run from the `genie/aws/` root directory.
+Run from your cloud wrapper root directory (`genie/aws/` or `genie/azure/`).
 
 ### Setup
 
@@ -807,15 +870,12 @@ make destroy ENV=prod && make destroy ENV=dev && make destroy ENV=account
 
 ## Troubleshooting
 
-### IAM role not deleted — `ExpiredToken`
+### AWS: IAM role not deleted — `ExpiredToken`
 
 **Symptom:**
 ```
 ⚠  Could not delete IAM role 'genie-test-uc-role-*': An error occurred (ExpiredToken)
    when calling the ListRolePolicies operation: The security token included in the request is expired
-⚠  Your AWS session token has expired.  To retry with fresh credentials:
-   1. Export new tokens:  AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_SESSION_TOKEN=...
-   2. Re-run teardown:    python scripts/provision_test_env.py teardown
 ```
 
 **Cause:** You are using temporary AWS STS credentials (`AWS_SESSION_TOKEN`). The integration
@@ -859,6 +919,35 @@ duration to at least 4 hours before starting the pipeline:
 aws sts assume-role --role-arn arn:aws:iam::<account>:role/<role> \
   --role-session-name genie-ci --duration-seconds 14400   # 4 hours
 ```
+
+---
+
+### Azure: Storage account or access connector not deleted — auth error
+
+**Symptom:**
+```
+⚠  Could not delete storage account 'genietest*': The client secret has expired.
+```
+
+**Cause:** Azure AD client secrets have a finite lifetime (default 6 months or 2 years). If the secret expires between provisioning and teardown, Azure API calls fail.
+
+**Fix — generate a new client secret and re-run teardown:**
+
+1. Azure Portal → Microsoft Entra ID → App registrations → your app → Certificates & secrets
+2. Generate a new client secret
+3. Update `AZURE_CLIENT_SECRET` in `scripts/account-admin.env`
+4. Re-run teardown:
+   ```bash
+   python scripts/provision_test_env.py teardown
+   ```
+
+**Fix (manual) — delete resources directly in Azure Portal:**
+
+1. Go to **Resource Groups → your RG**
+2. Search for `genietest` — delete the storage account and access connector
+3. Go to **Microsoft Entra ID → Enterprise applications** — remove any test managed identities
+
+**Prevention:** Use a client secret with a longer expiry (2 years), or automate secret rotation in your CI pipeline.
 
 ---
 

@@ -14,7 +14,7 @@ shift 3
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOTS_DIR="$PROJECT_ROOT/roots"
-ENVS_DIR="$PROJECT_ROOT/envs"
+ENVS_DIR="${ENVS_DIR:-$PROJECT_ROOT/envs}"
 
 case "$LAYER" in
   account)

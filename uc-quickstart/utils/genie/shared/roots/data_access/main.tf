@@ -4,6 +4,14 @@ terraform {
       source  = "databricks/databricks"
       version = "~> 1.91.0"
     }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.2"
+    }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.12"
+    }
   }
   required_version = ">= 1.0"
 
@@ -12,7 +20,7 @@ terraform {
 
 provider "databricks" {
   alias         = "account"
-  host          = "https://accounts.cloud.databricks.com"
+  host          = var.databricks_account_host
   account_id    = var.databricks_account_id
   client_id     = var.databricks_client_id
   client_secret = var.databricks_client_secret
@@ -23,6 +31,24 @@ provider "databricks" {
   host          = var.databricks_workspace_host
   client_id     = var.databricks_client_id
   client_secret = var.databricks_client_secret
+}
+
+locals {
+  project_root = abspath("${path.root}/../..")
+  # 3-part entries (catalog.schema.table) are already fully qualified and passed through as-is.
+  # 2-part entries (schema.table) are prefixed with uc_catalog (legacy schema-relative support).
+  full_uc_tables = [for t in var.uc_tables :
+    length(split(".", t)) >= 3 ? t : (var.uc_catalog != "" ? "${var.uc_catalog}.${t}" : t)
+  ]
+}
+
+variable "env_dir" {
+  type = string
+}
+
+variable "databricks_account_host" {
+  type    = string
+  default = "https://accounts.cloud.databricks.com"
 }
 
 variable "databricks_account_id" {
@@ -44,8 +70,7 @@ variable "databricks_workspace_id" {
 }
 
 variable "databricks_workspace_host" {
-  type    = string
-  default = ""
+  type = string
 }
 
 variable "uc_catalog" {
@@ -60,7 +85,7 @@ variable "uc_tables" {
 
 variable "manage_groups" {
   type    = bool
-  default = true
+  default = false
 }
 variable "groups" {
   type = map(object({
@@ -72,15 +97,6 @@ variable "group_members" {
   type    = map(list(string))
   default = {}
 }
-variable "tag_policies" {
-  type = list(object({
-    key         = string
-    description = optional(string, "")
-    values      = list(string)
-  }))
-  default = []
-}
-
 variable "tag_assignments" {
   type = list(object({
     entity_type = string
@@ -114,7 +130,7 @@ variable "sql_warehouse_id" {
 
 variable "warehouse_name" {
   type    = string
-  default = "ABAC Serverless Warehouse"
+  default = "ABAC Governance Warehouse"
 }
 
 variable "genie_space_id" {
@@ -190,28 +206,32 @@ variable "genie_join_specs" {
   default = []
 }
 
-module "account" {
-  source = "../../modules/account"
+module "data_access" {
+  source = "../../modules/data_access"
 
   providers = {
-    databricks.account    = databricks.account
-    databricks.workspace  = databricks.workspace
+    databricks.account   = databricks.account
+    databricks.workspace = databricks.workspace
   }
 
-  manage_groups = var.manage_groups
-  groups        = var.groups
-  group_members = var.group_members
-  tag_policies  = var.tag_policies
+  databricks_account_id     = var.databricks_account_id
+  databricks_client_id      = var.databricks_client_id
+  databricks_client_secret  = var.databricks_client_secret
+  databricks_workspace_host = var.databricks_workspace_host
+  groups                   = var.groups
+  uc_tables                = local.full_uc_tables
+  tag_assignments          = var.tag_assignments
+  fgac_policies            = var.fgac_policies
+  sql_warehouse_id         = var.sql_warehouse_id
+  warehouse_name           = var.warehouse_name
+  masking_sql_file         = "${var.env_dir}/masking_functions.sql"
+  deploy_masking_script    = "${local.project_root}/deploy_masking_functions.py"
 }
 
-output "group_ids" {
-  value = module.account.group_ids
+output "sql_warehouse_id" {
+  value = module.data_access.sql_warehouse_id
 }
 
-output "group_names" {
-  value = module.account.group_names
-}
-
-output "tag_policy_keys" {
-  value = module.account.tag_policy_keys
+output "catalogs" {
+  value = module.data_access.catalogs
 }

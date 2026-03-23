@@ -51,6 +51,7 @@ This file is gitignored and holds credentials:
 
 ```hcl
 databricks_account_id    = "..."
+databricks_account_host  = "https://..."   # required for Azure; defaults to AWS if omitted
 databricks_client_id     = "..."
 databricks_client_secret = "..."
 databricks_workspace_id  = "..."
@@ -64,10 +65,11 @@ Where to find each field:
 | Field | What it is | Where to find it |
 | ----- | ---------- | ---------------- |
 | `databricks_account_id` | Databricks account ID | Account Console, account selector, or account URL |
+| `databricks_account_host` | Account console API base URL | `https://accounts.cloud.databricks.com` (AWS) or `https://accounts.azuredatabricks.net` (Azure). Defaults to AWS if omitted — **Azure users must set this explicitly**. |
 | `databricks_client_id` | Service principal application/client ID | Account Console -> User management -> Service principals |
 | `databricks_client_secret` | OAuth secret for that service principal | Same service principal record |
 | `databricks_workspace_id` | Numeric target workspace ID | Account Console -> Workspaces, or `o=<workspace_id>` from the workspace URL |
-| `databricks_workspace_host` | Workspace browser/API base URL | Workspace browser URL, for example `https://dbc-....cloud.databricks.com/` |
+| `databricks_workspace_host` | Workspace browser/API base URL | Workspace browser URL, for example `https://dbc-....cloud.databricks.com/` (AWS) or `https://adb-....azuredatabricks.net` (Azure) |
 
 Service principal requirements:
 

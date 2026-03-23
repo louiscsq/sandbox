@@ -93,11 +93,23 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR  = Path(__file__).resolve().parent
-MODULE_ROOT = SCRIPT_DIR.parent
-ENVS_DIR    = MODULE_ROOT / "envs"          # user's real envs (never touched)
-TEST_ENVS_DIR = MODULE_ROOT / "envs" / "test"  # isolated dir for integration tests
+MODULE_ROOT = SCRIPT_DIR.parent                          # …/genie/shared/
+CLOUD_ROOT  = Path(os.environ.get("CLOUD_ROOT", MODULE_ROOT.parent / "aws"))
+ENVS_DIR    = CLOUD_ROOT / "envs"                       # user's real envs (never touched)
+TEST_ENVS_DIR = CLOUD_ROOT / "envs" / "test"            # isolated dir for integration tests
 STATE_FILE  = SCRIPT_DIR / ".test_env_state.json"
 DEFAULT_ENV_FILE = SCRIPT_DIR / "account-admin.env"
+
+
+def _display_path(p: Path) -> Path:
+    """Return a short relative path for display, trying MODULE_ROOT then CLOUD_ROOT."""
+    for base in (MODULE_ROOT, CLOUD_ROOT):
+        try:
+            return p.relative_to(base)
+        except ValueError:
+            continue
+    return p
+
 
 # ---------------------------------------------------------------------------
 # ANSI helpers
@@ -573,6 +585,13 @@ def _load_config(env_file: Path) -> dict[str, str]:
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
         "AWS_PROFILE",
+        "CLOUD_PROVIDER",
+        "AZURE_SUBSCRIPTION_ID",
+        "AZURE_RESOURCE_GROUP",
+        "AZURE_REGION",
+        "AZURE_TENANT_ID",
+        "AZURE_CLIENT_ID",
+        "AZURE_CLIENT_SECRET",
     ]:
         if key in os.environ:
             cfg[key] = os.environ[key]
@@ -584,13 +603,25 @@ def _validate_config(cfg: dict[str, str]) -> None:
         "DATABRICKS_ACCOUNT_ID",
         "DATABRICKS_CLIENT_ID",
         "DATABRICKS_CLIENT_SECRET",
-        "DATABRICKS_AWS_REGION",
     ]
     missing = [k for k in required if not cfg.get(k)]
     if missing:
         _err(f"Missing required config keys: {', '.join(missing)}")
         print(f"\n  Edit {DEFAULT_ENV_FILE} and fill in all values.", file=sys.stderr)
         sys.exit(1)
+    # Cloud-specific validation is done by the provider
+
+
+def _get_cloud_provider(cfg: dict) -> "CloudProvider":
+    """Return the appropriate cloud provider based on config."""
+    cloud = cfg.get("CLOUD_PROVIDER", "aws").lower()
+    if cloud == "aws":
+        from cloud_providers.aws_provider import AWSProvider
+        return AWSProvider()
+    elif cloud == "azure":
+        from cloud_providers.azure_provider import AzureProvider
+        return AzureProvider()
+    raise ValueError(f"Unsupported CLOUD_PROVIDER: {cloud}")
 
 # ---------------------------------------------------------------------------
 # State persistence
@@ -626,8 +657,10 @@ def _workspace_host(workspace) -> str:
         return url if url.startswith("https://") else f"https://{url}"
     deployment = getattr(workspace, "deployment_name", None)
     if deployment:
+        # Azure deployments end with .azuredatabricks.net; AWS with .cloud.databricks.com
+        if ".azuredatabricks.net" in deployment or ".cloud.databricks.com" in deployment:
+            return f"https://{deployment}"
         return f"https://{deployment}.cloud.databricks.com"
-    # Fallback: construct from workspace_id (works for most AWS deployments)
     return f"https://dbc-{workspace.workspace_id}.cloud.databricks.com"
 
 # ---------------------------------------------------------------------------
@@ -635,8 +668,15 @@ def _workspace_host(workspace) -> str:
 # (used when the installed SDK is too old to support compute_mode=SERVERLESS)
 # ---------------------------------------------------------------------------
 
+# Default is AWS; overridden by provider.account_host before first use.
 _ACCOUNT_HOST = "https://accounts.cloud.databricks.com"
 _SSL_CTX = ssl.create_default_context()
+
+
+def _set_account_host(host: str) -> None:
+    """Override the account host used by REST helper functions."""
+    global _ACCOUNT_HOST
+    _ACCOUNT_HOST = host
 
 
 def _oauth_token(account_id: str, client_id: str, client_secret: str) -> str:
@@ -693,6 +733,7 @@ def _create_serverless_workspace_rest(
     ws_name: str,
     region: str,
     timeout_s: int = 1200,
+    cloud_kwargs: dict | None = None,
 ) -> tuple[int, str]:
     """Create a serverless workspace via REST API and wait until RUNNING.
 
@@ -701,12 +742,17 @@ def _create_serverless_workspace_rest(
     """
     token = _oauth_token(account_id, client_id, client_secret)
 
-    ws_data = _account_post(token, f"/api/2.0/accounts/{account_id}/workspaces", {
+    payload = {
         "workspace_name": ws_name,
-        "aws_region":     region,
         "pricing_tier":   "ENTERPRISE",
         "compute_mode":   "SERVERLESS",
-    })
+    }
+    if cloud_kwargs:
+        payload.update(cloud_kwargs)
+    else:
+        payload["aws_region"] = region
+
+    ws_data = _account_post(token, f"/api/2.0/accounts/{account_id}/workspaces", payload)
     ws_id = ws_data["workspace_id"]
     print(f"  Workspace ID {ws_id} created — polling for RUNNING state…")
 
@@ -720,8 +766,13 @@ def _create_serverless_workspace_rest(
         print(f"  [{int(time.time() % 100000)}]  {status}  {msg}")
         if status == "RUNNING":
             deployment = data.get("deployment_name", "")
-            host = (f"https://{deployment}.cloud.databricks.com"
-                    if deployment else f"https://dbc-{ws_id}.cloud.databricks.com")
+            if deployment:
+                if ".azuredatabricks.net" in deployment or ".cloud.databricks.com" in deployment:
+                    host = f"https://{deployment}"
+                else:
+                    host = f"https://{deployment}.cloud.databricks.com"
+            else:
+                host = f"https://dbc-{ws_id}.cloud.databricks.com"
             return ws_id, host
         if status in ("FAILED", "BANNED", "CANCELLED"):
             raise RuntimeError(f"Workspace creation failed: {status} — {msg}")
@@ -734,6 +785,45 @@ def _create_serverless_workspace_rest(
 # Auth file writer
 # ---------------------------------------------------------------------------
 
+
+def _create_workspace_via_account_api(
+    account_client,
+    provider,
+    ws_name: str,
+    region: str,
+    account_id: str,
+    client_id: str,
+    client_secret: str,
+    has_compute_mode: bool,
+) -> tuple[int, str]:
+    """Create a workspace using the Databricks Account API (AWS path)."""
+    from databricks.sdk.service.provisioning import PricingTier
+
+    _step(f"Creating serverless workspace: {ws_name}")
+    print("  (This typically takes 10-15 minutes — please wait…)")
+
+    ws_cloud_kwargs = provider.workspace_create_kwargs(region)
+    # The SDK path only works for AWS (it expects aws_region, not location).
+    # For non-AWS clouds, always use the REST path which handles cloud_kwargs generically.
+    use_sdk = has_compute_mode and "aws_region" in ws_cloud_kwargs
+    if use_sdk:
+        from databricks.sdk.service.provisioning import CustomerFacingComputeMode
+        ws_obj = account_client.workspaces.create_and_wait(
+            workspace_name=ws_name,
+            pricing_tier=PricingTier.ENTERPRISE,
+            compute_mode=CustomerFacingComputeMode.SERVERLESS,
+            **ws_cloud_kwargs,
+        )
+        ws_id = ws_obj.workspace_id
+        ws_host = _workspace_host(ws_obj)
+    else:
+        ws_id, ws_host = _create_serverless_workspace_rest(
+            account_id, client_id, client_secret, ws_name, region,
+            cloud_kwargs=ws_cloud_kwargs,
+        )
+    return ws_id, ws_host
+
+
 def _write_auth_file(
     env: str,
     account_id: str,
@@ -741,6 +831,7 @@ def _write_auth_file(
     client_secret: str,
     workspace_id: int,
     workspace_host: str,
+    account_host: str = "https://accounts.cloud.databricks.com",
 ) -> Path:
     """Write envs/<env>/auth.auto.tfvars with the provisioned credentials."""
     env_dir = ENVS_DIR / env
@@ -752,6 +843,7 @@ def _write_auth_file(
 # Run `python scripts/provision_test_env.py teardown` to clean up.
 # This file is gitignored.
 
+databricks_account_host  = "{account_host}"
 databricks_account_id    = "{account_id}"
 databricks_client_id     = "{client_id}"
 databricks_client_secret = "{client_secret}"
@@ -772,15 +864,11 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     account_id    = cfg["DATABRICKS_ACCOUNT_ID"]
     client_id     = cfg["DATABRICKS_CLIENT_ID"]
     client_secret = cfg["DATABRICKS_CLIENT_SECRET"]
-    region        = cfg["DATABRICKS_AWS_REGION"]
 
-    # Derive the bucket name from the caller's AWS account ID.
-    # The bucket is created automatically if it does not exist (Step 0).
-    _ensure_boto3()
-    _tmp_session    = _aws_session(cfg, region)
-    _aws_account_id = _tmp_session.client("sts", region_name=region).get_caller_identity()["Account"]
-    bucket_name     = f"genie-uc-test-{_aws_account_id}"
-    ms_bucket_url   = f"s3://{bucket_name}"
+    # Instantiate the cloud provider plugin and validate cloud-specific config.
+    provider = _get_cloud_provider(cfg)
+    provider.validate_config(cfg)
+    region = provider.get_region(cfg)
 
     # Check if already provisioned
     existing = _load_state()
@@ -800,17 +888,12 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     run_id         = uuid.uuid4().hex[:10]
     ws_name        = f"genie-test-{run_id}"
     ms_name        = f"genie-test-ms-{run_id}"
-    iam_role_name  = f"genie-test-uc-role-{run_id}"   # created + deleted by this script
-    # Each run gets its own S3 prefix so catalog data is fully isolated.
-    ext_loc_url    = f"{ms_bucket_url}/genie-test-{run_id}"
 
     print(f"\n  Run ID          : {run_id}")
     print(f"  Workspace       : {ws_name}")
     print(f"  Metastore       : {ms_name}")
     print(f"  Region          : {region}")
-    print(f"  S3 bucket       : {bucket_name}  (auto-managed)")
-    print(f"  External loc    : {ext_loc_url}")
-    print(f"  IAM role        : {iam_role_name}  (will be created)")
+    print(f"  Cloud provider  : {cfg.get('CLOUD_PROVIDER', 'aws')}")
     print(f"  SP (admin)      : {client_id}")
 
     if dry_run:
@@ -818,10 +901,12 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
         return
 
     # ------------------------------------------------------------------
-    # Step 0: Ensure the S3 bucket exists (create it if not).
-    # We track whether WE created it so teardown can clean up accordingly.
+    # Step 0: Create cloud storage resources (S3 bucket + IAM role for AWS,
+    # ADLS container + Access Connector for Azure, etc.).
+    # The provider handles all cloud-specific resource creation.
     # ------------------------------------------------------------------
-    bucket_created = _ensure_s3_bucket(cfg, bucket_name, region)
+    storage_result = provider.setup_storage(cfg, run_id, region, account_id)
+    ext_loc_url = provider.storage_url_for_ext_location(storage_result, run_id)
 
     # ------------------------------------------------------------------
     # Ensure the SDK is new enough to support compute_mode=SERVERLESS.
@@ -867,14 +952,13 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     from databricks.sdk.service.iam import WorkspacePermission, ComplexValue
     from databricks.sdk.service.catalog import (
         CreateAccountsMetastore,
-        CreateAccountsStorageCredential,
         CreateMetastoreAssignment,
-        UpdateAccountsMetastore,
-        AwsIamRoleRequest,
     )
 
+    account_host = provider.account_host
+    _set_account_host(account_host)  # for REST fallback functions
     a = AccountClient(
-        host="https://accounts.cloud.databricks.com",
+        host=account_host,
         account_id=account_id,
         client_id=client_id,
         client_secret=client_secret,
@@ -915,16 +999,13 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     # that a crash mid-way still leaves enough info for teardown.
     state: dict = {
         "run_id":          run_id,
+        "cloud_provider":  cfg.get("CLOUD_PROVIDER", "aws").lower(),
         "workspace_name":  ws_name,
         "workspace_id":    None,
         "workspace_host":  None,
         "metastore_name":  ms_name,
         "metastore_id":    None,
         "ext_loc_url":     ext_loc_url,
-        "iam_role_name":   iam_role_name,   # deleted by teardown
-        "bucket_name":     bucket_name,     # used by teardown for S3 cleanup
-        "bucket_created":  bucket_created,  # if True, teardown deletes the bucket
-        "ext_loc_prefix":  f"genie-test-{run_id}",  # S3 prefix to clean on teardown
         "region":          region,
         "account_id":        account_id,
         "sp_client_id":      client_id,
@@ -933,26 +1014,26 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
         "admin_group_id":    group_id,
         "written_auth_envs": [],
         "provisioned_at":    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        **provider.state_extras(storage_result),
     }
 
     # ------------------------------------------------------------------
     # Step 2: Create serverless workspace (fire and wait)
     # ------------------------------------------------------------------
-    _step(f"Creating serverless workspace: {ws_name}")
-    print("  (This typically takes 10-15 minutes — please wait…)")
-
-    if _has_compute_mode:
-        ws_obj = a.workspaces.create_and_wait(
-            workspace_name=ws_name,
-            aws_region=region,
-            pricing_tier=PricingTier.ENTERPRISE,
-            compute_mode=_COMPUTE_MODE,
-        )
-        ws_id   = ws_obj.workspace_id
-        ws_host = _workspace_host(ws_obj)
+    # Azure workspaces are ARM resources — use provider.create_workspace().
+    # AWS workspaces use the Databricks Account API.
+    if hasattr(provider, 'create_workspace') and callable(getattr(provider, 'create_workspace', None)):
+        try:
+            ws_id, ws_host = provider.create_workspace(cfg, ws_name, region, a)
+        except NotImplementedError:
+            ws_id, ws_host = _create_workspace_via_account_api(
+                a, provider, ws_name, region, account_id, client_id, client_secret,
+                _has_compute_mode,
+            )
     else:
-        ws_id, ws_host = _create_serverless_workspace_rest(
-            account_id, client_id, client_secret, ws_name, region
+        ws_id, ws_host = _create_workspace_via_account_api(
+            a, provider, ws_name, region, account_id, client_id, client_secret,
+            _has_compute_mode,
         )
 
     state["workspace_id"]   = ws_id
@@ -961,26 +1042,10 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     _ok(f"Workspace ready: id={ws_id}  host={ws_host}")
 
     # ------------------------------------------------------------------
-    # Step 3a: Create a fresh AWS IAM role for this test run.
-    # The role is scoped to the test S3 prefix and will be deleted on teardown.
-    # ------------------------------------------------------------------
-    _step(f"Creating AWS IAM role: {iam_role_name}")
-    iam_role_arn = _create_uc_iam_role(
-        cfg=cfg,
-        role_name=iam_role_name,
-        bucket=bucket_name,
-        account_id=account_id,
-        region=region,
-    )
-    state["iam_role_name"] = iam_role_name   # ensure teardown can delete it
-    _save_state(state)
-    _ok(f"IAM role created: {iam_role_arn}")
-
-    # ------------------------------------------------------------------
-    # Step 3b: Create a fresh Unity Catalog metastore (no storage_root).
-    # Storage is managed via an External Location (created in step 3d),
+    # Step 3: Create a fresh Unity Catalog metastore (no storage_root).
+    # Storage is managed via an External Location (created below),
     # which is the recommended UC pattern — External Locations provide
-    # fine-grained, path-scoped S3 access instead of a metastore-wide root.
+    # fine-grained, path-scoped access instead of a metastore-wide root.
     # ------------------------------------------------------------------
     _step(f"Creating Unity Catalog metastore: {ms_name}")
     ms_resp = a.metastores.create(
@@ -997,62 +1062,19 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     _ok(f"Metastore created: id={ms_id}")
 
     # ------------------------------------------------------------------
-    # Step 3c: Register the IAM role as a storage credential in the new
-    # metastore.  The Databricks API returns unity_catalog_iam_arn — the
-    # specific ARN of the Databricks UC service role that will assume our
-    # IAM role.  We then tighten the trust policy to use that exact ARN.
+    # Step 3c: Register the storage credential in the new metastore.
+    # The provider handles cloud-specific credential creation (AWS IAM
+    # role request, Azure managed identity, etc.).
     # ------------------------------------------------------------------
-    _step(f"Registering storage credential in metastore")
-    storage_cred_id       = None
-    unity_catalog_iam_arn = None
-    try:
-        new_cred_resp = a.storage_credentials.create(
-            metastore_id=ms_id,
-            credential_info=CreateAccountsStorageCredential(
-                name="test-ext-loc-cred",
-                aws_iam_role=AwsIamRoleRequest(role_arn=iam_role_arn),
-                comment="Storage credential for test External Location — provision_test_env.py",
-            ),
-        )
-        new_cred_info         = getattr(new_cred_resp, "credential_info", None) or new_cred_resp
-        storage_cred_id       = new_cred_info.id
-        # Extract the Databricks-side UC IAM ARN so we can narrow the trust policy.
-        aws_iam_role_info     = getattr(new_cred_info, "aws_iam_role", None)
-        unity_catalog_iam_arn = getattr(aws_iam_role_info, "unity_catalog_iam_arn", None)
-        _ok(f"Storage credential registered: id={storage_cred_id!r}")
-        if unity_catalog_iam_arn:
-            _ok(f"Databricks UC principal  : {unity_catalog_iam_arn}")
-    except Exception as exc:
-        _warn(f"Could not register storage credential: {exc}")
-        _warn("External location creation will fail.")
+    credential_result = provider.register_storage_credential(a, ms_id, storage_result)
+    storage_cred_id = credential_result.credential_id
 
     # ------------------------------------------------------------------
-    # Step 3d: Tighten the IAM trust policy now that we know the exact
-    # Databricks UC principal ARN.  This is a security best practice —
-    # the initial trust allows 414351767826:root; we narrow it to the
-    # specific unity_catalog_iam_arn returned by the credential API.
+    # Step 3d: Perform any post-credential-registration steps.
+    # For AWS: tighten the IAM trust policy to the specific UC principal.
+    # For Azure: no-op.
     # ------------------------------------------------------------------
-    if unity_catalog_iam_arn:
-        _step("Updating IAM trust policy with Databricks UC principal")
-        try:
-            _update_uc_trust_policy(
-                cfg=cfg,
-                role_name=iam_role_name,
-                role_arn=iam_role_arn,
-                unity_catalog_iam_arn=unity_catalog_iam_arn,
-                account_id=account_id,
-                region=region,
-            )
-            _ok("Trust policy updated")
-            # AWS IAM is eventually consistent — wait for the updated trust
-            # policy (including the self-assume statement) to propagate before
-            # Databricks validates it when creating the External Location.
-            # 15 s is often too short; use 60 s to avoid transient failures.
-            _warn("Waiting 60 s for trust policy propagation…")
-            time.sleep(60)
-        except Exception as exc:
-            _warn(f"Could not update trust policy: {exc}")
-            _warn("Storage credential may not work. Update the trust policy manually in AWS IAM.")
+    provider.post_credential_setup(cfg, storage_result, credential_result, account_id, region)
 
     # ------------------------------------------------------------------
     # Step 4: Assign metastore to workspace
@@ -1157,7 +1179,7 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     # Step 7: Write auth.auto.tfvars into the isolated envs/test/ directory
     #         so user's real envs/dev/ is never touched.
     # ------------------------------------------------------------------
-    _step(f"Writing auth.auto.tfvars into {TEST_ENVS_DIR.relative_to(MODULE_ROOT)}/")
+    _step(f"Writing auth.auto.tfvars into {_display_path(TEST_ENVS_DIR)}/")
     written_envs = []
     for env in ["dev", "bu2", "prod"]:
         env_dir = TEST_ENVS_DIR / env
@@ -1166,36 +1188,38 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
         content = (
             f'# Generated by provision_test_env.py — DO NOT EDIT MANUALLY.\n'
             f'# Run `python scripts/provision_test_env.py teardown` to clean up.\n'
+            f'databricks_account_host   = "{provider.account_host}"\n'
             f'databricks_account_id     = "{account_id}"\n'
             f'databricks_client_id      = "{client_id}"\n'
             f'databricks_client_secret  = "{client_secret}"\n'
             f'databricks_workspace_id   = "{ws_id}"\n'
             f'databricks_workspace_host = "{ws_host}"\n'
-            f'# Base S3 prefix for catalog managed storage (External Location).\n'
+            f'# Base storage URL for catalog managed storage (External Location).\n'
             f'# Each catalog gets its own subfolder: {{catalog_storage_base}}/{{catalog_name}}/\n'
             f'catalog_storage_base      = "{ext_loc_url}"\n'
         )
         auth_path = env_dir / "auth.auto.tfvars"
         auth_path.write_text(content)
         written_envs.append(str(auth_path))
-        _ok(f"Wrote {auth_path.relative_to(MODULE_ROOT)}")
+        _ok(f"Wrote {auth_path.relative_to(CLOUD_ROOT)}")
 
     acct_dir = TEST_ENVS_DIR / "account"
     acct_dir.mkdir(parents=True, exist_ok=True)
     (acct_dir / "auth.auto.tfvars").write_text(
         f'# Generated by provision_test_env.py\n'
+        f'databricks_account_host  = "{provider.account_host}"\n'
         f'databricks_account_id    = "{account_id}"\n'
         f'databricks_client_id     = "{client_id}"\n'
         f'databricks_client_secret = "{client_secret}"\n'
         f'databricks_workspace_id  = "{ws_id}"\n'
         f'databricks_workspace_host = "{ws_host}"\n'
     )
-    _ok(f"Wrote {(acct_dir / 'auth.auto.tfvars').relative_to(MODULE_ROOT)}")
+    _ok(f"Wrote {(acct_dir / 'auth.auto.tfvars').relative_to(CLOUD_ROOT)}")
 
     state["written_auth_envs"] = written_envs
     state["test_envs_dir"] = str(TEST_ENVS_DIR)
     _save_state(state)
-    _ok(f"State saved to {STATE_FILE.relative_to(MODULE_ROOT)}")
+    _ok(f"State saved to {_display_path(STATE_FILE)}")
 
     # ------------------------------------------------------------------
     # Summary
@@ -1262,63 +1286,26 @@ def cmd_teardown(dry_run: bool = False) -> None:
         _err(f"  Set it in {env_file} or export DATABRICKS_CLIENT_SECRET=...")
         sys.exit(1)
 
+    # Resolve cloud provider (from state or env file) before creating AccountClient
+    # so we use the correct account host (AWS vs Azure).
+    if not env_cfg.get("CLOUD_PROVIDER") and state.get("cloud_provider"):
+        env_cfg["CLOUD_PROVIDER"] = state["cloud_provider"]
+    provider = _get_cloud_provider(env_cfg)
+
     from databricks.sdk import AccountClient
 
     a = AccountClient(
-        host="https://accounts.cloud.databricks.com",
+        host=provider.account_host,
         account_id=account_id,
         client_id=client_id,
         client_secret=client_secret,
     )
 
     # ------------------------------------------------------------------
-    # Step 0: Delete the AWS IAM role (created by provision, no longer needed)
+    # Step 0: Delete cloud storage resources (IAM role + S3 for AWS,
+    # Access Connector + Storage Account for Azure, etc.)
     # ------------------------------------------------------------------
-    iam_role_name = state.get("iam_role_name")
-    region        = state.get("region", "us-east-1")
-    if iam_role_name:
-        _step(f"Deleting AWS IAM role: {iam_role_name}")
-        try:
-            # Reload AWS credentials from the env file for teardown.
-            _delete_iam_role(env_cfg, iam_role_name, region)
-            _ok(f"IAM role deleted: {iam_role_name}")
-        except Exception as exc:
-            _warn(f"Could not delete IAM role {iam_role_name!r}: {exc}")
-            if "ExpiredToken" in str(exc) or "expired" in str(exc).lower():
-                _warn("Your AWS session token has expired.  To retry with fresh credentials:")
-                _warn("  1. Export new tokens:  AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_SESSION_TOKEN=...")
-                _warn("  2. Re-run teardown:    python scripts/provision_test_env.py teardown")
-                _warn("  Or delete manually:   AWS Console → IAM → Roles → search for the name above.")
-            else:
-                _warn("Delete it manually in the AWS console: IAM → Roles → search for the name above.")
-    else:
-        _step("No IAM role in state — skipping IAM deletion")
-
-    # ------------------------------------------------------------------
-    # Step 0b: S3 cleanup
-    #  • Always remove objects under the test prefix (good housekeeping).
-    #  • If we created the bucket, also delete it entirely.
-    #  - Always remove objects under the test prefix (good housekeeping).
-    #  - If we created the bucket, also delete it entirely.
-    # ------------------------------------------------------------------
-    bucket_name    = state.get("bucket_name")
-    bucket_created = state.get("bucket_created", False)
-    ext_loc_prefix = state.get("ext_loc_prefix", "")
-    region         = state.get("region", "us-east-1")
-    if bucket_name and ext_loc_prefix:
-        try:
-            _delete_s3_prefix(env_cfg, bucket_name, ext_loc_prefix, region)
-        except Exception as exc:
-            _warn(f"Could not clean S3 prefix: {exc}")
-    if bucket_name and bucket_created:
-        _step(f"Deleting S3 bucket created by provision: s3://{bucket_name}")
-        try:
-            _delete_s3_bucket(env_cfg, bucket_name, region)
-        except Exception as exc:
-            _warn(f"Could not delete S3 bucket: {exc}")
-            _warn(f"Delete it manually: aws s3 rb s3://{bucket_name} --force")
-    elif bucket_name:
-        _ok(f"Bucket s3://{bucket_name} was pre-existing — not deleted.")
+    provider.teardown_storage(env_cfg, state)
 
     # ------------------------------------------------------------------
     # Step 1: Unassign metastore from workspace (required before deletion)
@@ -1359,13 +1346,16 @@ def cmd_teardown(dry_run: bool = False) -> None:
     # ------------------------------------------------------------------
     # Step 4: Delete workspace
     # ------------------------------------------------------------------
-    _step(f"Deleting workspace: {ws_name}")
-    try:
-        a.workspaces.delete(workspace_id=int(ws_id))
-        _ok(f"Workspace deleted")
-    except Exception as exc:
-        _warn(f"Could not delete workspace: {exc}")
-        _warn("You may need to delete it manually in the Account Console.")
+    if hasattr(provider, 'teardown_workspace') and callable(getattr(provider, 'teardown_workspace', None)):
+        provider.teardown_workspace(env_cfg, state)
+    else:
+        _step(f"Deleting workspace: {ws_name}")
+        try:
+            a.workspaces.delete(workspace_id=int(ws_id))
+            _ok(f"Workspace deleted")
+        except Exception as exc:
+            _warn(f"Could not delete workspace: {exc}")
+            _warn("You may need to delete it manually in the Account Console.")
 
     # ------------------------------------------------------------------
     # Step 5: Remove the entire envs/test/ directory
@@ -1375,7 +1365,7 @@ def cmd_teardown(dry_run: bool = False) -> None:
     if test_envs.exists():
         import shutil as _shutil
         _shutil.rmtree(test_envs)
-        _ok(f"Removed {test_envs.relative_to(MODULE_ROOT)}")
+        _ok(f"Removed {test_envs.relative_to(CLOUD_ROOT)}")
 
     # ------------------------------------------------------------------
     # Step 6: Clear state
@@ -1384,11 +1374,7 @@ def cmd_teardown(dry_run: bool = False) -> None:
     _ok("State file cleared")
 
     _banner("Teardown Complete")
-    print("\n  The IAM role, workspace, metastore, and admin group have been deleted.")
-    if bucket_created:
-        print(f"  S3 bucket s3://{bucket_name} was created by provision and has been deleted.")
-    elif bucket_name:
-        print(f"  S3 test prefix cleaned; bucket s3://{bucket_name} (pre-existing) was not deleted.")
+    print("\n  Cloud resources, workspace, metastore, and admin group have been deleted.")
     print("  Run `provision` to create a fresh environment for the next test run.")
     print()
 

@@ -16,7 +16,7 @@ terraform {
 
 provider "databricks" {
   alias         = "account"
-  host          = var.genie_only ? var.databricks_workspace_host : "https://accounts.cloud.databricks.com"
+  host          = var.genie_only ? var.databricks_workspace_host : var.databricks_account_host
   account_id    = var.genie_only ? null : var.databricks_account_id
   client_id     = var.databricks_client_id
   client_secret = var.databricks_client_secret
@@ -114,6 +114,11 @@ locals {
 
 variable "env_dir" {
   type = string
+}
+
+variable "databricks_account_host" {
+  type    = string
+  default = "https://accounts.cloud.databricks.com"
 }
 
 variable "databricks_account_id" {

@@ -115,13 +115,15 @@ if not sys.stdout.line_buffering:
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR  = Path(__file__).resolve().parent
-MODULE_ROOT = SCRIPT_DIR.parent          # …/genie/aws/
+MODULE_ROOT = SCRIPT_DIR.parent          # …/genie/shared/
+CLOUD_ROOT  = Path(os.environ.get("CLOUD_ROOT", MODULE_ROOT.parent / "aws"))
 
 # ENVS_DIR is set dynamically in main() — either from --envs-dir, from the
-# provisioned state file (envs/test/), or defaulting to envs/.
+# ENVS_DIR env var (set by the cloud-specific Makefile), from the provisioned
+# state file (envs/test/), or defaulting to envs/ under the cloud wrapper root.
 # All helpers that reference ENVS_DIR use the module-level variable so that
 # changing it once in main() propagates everywhere.
-ENVS_DIR    = MODULE_ROOT / "envs"
+ENVS_DIR    = Path(os.environ.get("ENVS_DIR", CLOUD_ROOT / "envs"))
 
 PROVISION_STATE_FILE = SCRIPT_DIR / ".test_env_state.json"
 
@@ -257,7 +259,7 @@ def _run(
 
 def _make(
     *targets_and_vars: str,
-    cwd: Path = MODULE_ROOT,
+    cwd: Path = CLOUD_ROOT,
     check: bool = True,
     retries: int = 0,
     retry_delay_seconds: int = 0,
@@ -281,7 +283,7 @@ def _make(
     # The Makefile hardcodes MODULE_ROOT/envs/<ENV>; these overrides redirect
     # all file access to the isolated envs/test/<env>/ paths.
     injected: list[str] = []
-    _default_envs = MODULE_ROOT / "envs"
+    _default_envs = CLOUD_ROOT / "envs"
     if ENVS_DIR != _default_envs:
         # Parse env-related variables already in targets_and_vars.
         existing_keys = {v.split("=", 1)[0] for v in targets_and_vars if "=" in v}
@@ -969,8 +971,9 @@ def _force_delete_groups(*envs: str) -> None:
         if not account_id:
             return
 
+        account_host = _s(cfg.get("databricks_account_host", "https://accounts.cloud.databricks.com"))
         a = AccountClient(
-            host="https://accounts.cloud.databricks.com",
+            host=account_host,
             account_id=account_id,
             client_id=client_id,
             client_secret=client_secret,
@@ -1951,8 +1954,9 @@ def _create_genie_only_sp(
     client_id     = _s(cfg.get("databricks_client_id", ""))
     client_secret = _s(cfg.get("databricks_client_secret", ""))
 
+    account_host = _s(cfg.get("databricks_account_host", "https://accounts.cloud.databricks.com"))
     a = AccountClient(
-        host="https://accounts.cloud.databricks.com",
+        host=account_host,
         account_id=account_id,
         client_id=client_id,
         client_secret=client_secret,
@@ -2087,7 +2091,7 @@ def _delete_sp(auth_file: Path, sp_scim_id: int) -> None:
     _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
 
     a = AccountClient(
-        host="https://accounts.cloud.databricks.com",
+        host=_s(cfg.get("databricks_account_host", "https://accounts.cloud.databricks.com")),
         account_id=_s(cfg.get("databricks_account_id", "")),
         client_id=_s(cfg.get("databricks_client_id", "")),
         client_secret=_s(cfg.get("databricks_client_secret", "")),
@@ -3439,6 +3443,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     global ENVS_DIR  # DEFAULT_AUTH_FILE is derived from ENVS_DIR, not a separate global
     fresh_env = False
+    _cloud_root = CLOUD_ROOT
 
     if PROVISION_STATE_FILE.exists():
         try:
@@ -3448,13 +3453,31 @@ def main() -> None:
             if _test_envs and Path(_test_envs).exists():
                 ENVS_DIR = Path(_test_envs)
                 fresh_env = True
-                print(f"\n  {_cyan('●')}  Provisioned environment detected — using {ENVS_DIR.relative_to(MODULE_ROOT)}/")
+                try:
+                    _envs_display = ENVS_DIR.relative_to(MODULE_ROOT)
+                except ValueError:
+                    try:
+                        _envs_display = ENVS_DIR.relative_to(_cloud_root)
+                    except ValueError:
+                        _envs_display = ENVS_DIR
+                print(f"\n  {_cyan('●')}  Provisioned environment detected — using {_envs_display}/")
                 print(f"     FGAC quota wait and pre-flight check are disabled (fresh metastore).")
         except Exception:
             pass
 
     _default_auth = ENVS_DIR / "dev" / "auth.auto.tfvars"
-    auth_file    = Path(args.auth_file if args.auth_file != str(MODULE_ROOT / "envs" / "dev" / "auth.auto.tfvars")
+    # If the user passed the default auth path (from Makefile or CLI default),
+    # redirect to the provisioned test env auth file when available.
+    # Compare resolved absolute paths since args.auth_file may be relative.
+    # The user/Makefile may pass a path relative to cwd (e.g. "envs/dev/..."),
+    # which resolves differently from MODULE_ROOT or CLOUD_ROOT based paths.
+    _resolved_arg = str(Path(args.auth_file).resolve())
+    _stock_defaults = {
+        str((MODULE_ROOT / "envs" / "dev" / "auth.auto.tfvars").resolve()),
+        str((_cloud_root / "envs" / "dev" / "auth.auto.tfvars").resolve()),
+        str((Path.cwd() / "envs" / "dev" / "auth.auto.tfvars").resolve()),
+    }
+    auth_file    = Path(_resolved_arg if _resolved_arg not in _stock_defaults
                         else _default_auth).resolve()
     # Only propagate an explicitly-specified warehouse ID to scenarios.
     # Auto-discovered IDs (from _resolve_warehouse_id) are NOT propagated:
@@ -3499,7 +3522,14 @@ def main() -> None:
     fail_fast = args.fail_fast
 
     print(f"  Auth:      {auth_file}")
-    print(f"  Envs dir:  {ENVS_DIR.relative_to(MODULE_ROOT)}/")
+    try:
+        _ed = ENVS_DIR.relative_to(MODULE_ROOT)
+    except ValueError:
+        try:
+            _ed = ENVS_DIR.relative_to(_cloud_root)
+        except ValueError:
+            _ed = ENVS_DIR
+    print(f"  Envs dir:  {_ed}/")
     print(f"  Warehouse: {_display_wh or '(auto)'}{' [pinned]' if args.warehouse_id else ' [auto-discover per-component]'}")
     print(f"  Fresh env: {fresh_env}")
     print(f"  Keep data: {keep_data}")

@@ -18,7 +18,7 @@ Before running imports, ensure:
 
 ## Usage
 
-From `genie/aws`:
+From your cloud wrapper directory (`genie/aws/` or `genie/azure/`):
 
 ```bash
 # Import account identities
