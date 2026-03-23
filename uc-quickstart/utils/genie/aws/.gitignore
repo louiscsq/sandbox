@@ -45,3 +45,8 @@ scripts/.test_env_state.json
 
 # Isolated integration-test environment (written by provision_test_env.py)
 envs/test/
+
+# Sandbox evaluation environments (contain credentials)
+envs/sandbox_eval/
+envs/sandbox_eval2/
+envs/sandbox_eval3/
