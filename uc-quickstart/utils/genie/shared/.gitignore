@@ -1,0 +1,17 @@
+# Provisioned test environment state + credentials (contain secrets)
+scripts/account-admin.env
+scripts/account-admin.env.*
+scripts/.test_env_state.json
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Terraform state (may contain secrets)
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# AI-generated output (user-specific)
+generated/
+masking_functions.sql
