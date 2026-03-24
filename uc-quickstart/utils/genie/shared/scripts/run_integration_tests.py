@@ -3663,8 +3663,9 @@ def scenario_country_overlay(
     _try_destroy_account()
 
     # ── Phase 5: Multi-region generation + apply ─────────────────────────────
-    _step("Phase 5 — Generating with COUNTRY=ANZ,IN,SEA (multi-region)")
+    _step("Phase 5 — Ensuring APJ columns exist + generating multi-region")
     _clean_env_artifacts(env)
+    _ensure_apj_columns()
     _make("setup", f"ENV={env}")
     _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
     _make("generate", f"ENV={env}", "COUNTRY=ANZ,IN,SEA", retries=2)
