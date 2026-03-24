@@ -4129,6 +4129,13 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_dropped:
             print(f"  Auto-fixed: dropped {n_dropped} fgac_policy/ies exceeding per-catalog limit ({_FGAC_PER_CATALOG_LIMIT})")
 
+        # Second pass: autofix_missing_fgac_policies (above) may have injected
+        # new hasTagValue() conditions referencing values that weren't in the
+        # original tag_policies.  Re-run autofix_tag_policies to pick them up.
+        n_fixed_2 = autofix_tag_policies(tfvars_path)
+        if n_fixed_2:
+            print(f"  Auto-fixed {n_fixed_2} additional missing tag_policy value(s) (second pass)")
+
         n_fields = autofix_genie_config_fields(tfvars_path)
         if n_fields:
             print(f"  Auto-fixed: added {n_fields} missing required field(s) in genie_space_configs")
