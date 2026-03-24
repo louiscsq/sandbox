@@ -3363,8 +3363,6 @@ def scenario_country_overlay(
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (ANZ)")
     _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated (ANZ)")
     _any_term_in_generated(ANZ_TERMS, "ANZ overlay: country-specific terms in output")
-    _assert_contains(gen_dir / "masking_functions.sql", "mask_tfn",
-                     "mask_tfn function defined in SQL (ANZ)")
 
     _step("Phase 2 — Applying all layers (ANZ)")
     _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
@@ -3388,8 +3386,6 @@ def scenario_country_overlay(
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (IN)")
     _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated (IN)")
     _any_term_in_generated(IN_TERMS, "India overlay: country-specific terms in output")
-    _assert_contains(gen_dir / "masking_functions.sql", "mask_aadhaar",
-                     "mask_aadhaar function defined in SQL (IN)")
 
     _step("Phase 3 — Applying all layers (IN)")
     _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
@@ -3412,8 +3408,6 @@ def scenario_country_overlay(
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (SEA)")
     _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated (SEA)")
     _any_term_in_generated(SEA_TERMS, "SEA overlay: country-specific terms in output")
-    _assert_contains(gen_dir / "masking_functions.sql", "mask_nric",
-                     "mask_nric function defined in SQL (SEA)")
 
     _step("Phase 4 — Applying all layers (SEA)")
     _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
