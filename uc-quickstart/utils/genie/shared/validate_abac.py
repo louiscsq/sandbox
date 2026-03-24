@@ -29,6 +29,8 @@ VALID_ENTITY_TYPES = {"tables", "columns"}
 VALID_POLICY_TYPES = {"POLICY_TYPE_COLUMN_MASK", "POLICY_TYPE_ROW_FILTER"}
 BUILTIN_PRINCIPALS = {"account users"}
 
+COUNTRIES_DIR = Path(__file__).resolve().parent / "countries"
+
 COLUMN_MASK_REQUIRED = {"name", "policy_type", "catalog", "to_principals", "match_condition", "match_alias", "function_name", "function_catalog", "function_schema"}
 ROW_FILTER_REQUIRED = {"name", "policy_type", "catalog", "to_principals", "function_name", "function_catalog", "function_schema"}
 
@@ -175,6 +177,51 @@ def _value_requires_coverage(tag_value: str) -> bool:
     return tag_value.strip().lower() not in {"public", "general", "exact"}
 
 
+def _load_country_categories(
+    country_codes: list[str],
+) -> tuple[dict[str, str], dict[str, set[str]]]:
+    """Load country overlays and return (hint→category, function→categories) mappings.
+
+    hint_to_category: maps column name substrings (e.g. "tfn") to category strings
+                      (e.g. "government_id") for extending _infer_column_categories.
+    func_to_categories: maps masking function names (e.g. "mask_tfn") to the set of
+                        categories they are expected to be applied to.
+    """
+    try:
+        import yaml
+    except ImportError:
+        print("  WARNING: pyyaml not installed — skipping country-aware validation")
+        return {}, {}
+
+    hint_to_category: dict[str, str] = {}
+    func_to_categories: dict[str, set[str]] = {}
+
+    for code in country_codes:
+        code_upper = code.strip().upper()
+        yaml_path = COUNTRIES_DIR / f"{code_upper}.yaml"
+        if not yaml_path.exists():
+            continue
+
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f)
+
+        for ident in data.get("identifiers", []):
+            category = ident.get("category", "")
+            if not category:
+                continue
+            for hint in ident.get("column_hints", []):
+                hint_to_category[hint.lower()] = category
+            fn = ident.get("masking_function")
+            if fn:
+                func_to_categories.setdefault(fn, set()).add(category)
+
+    return hint_to_category, func_to_categories
+
+
+# Country-specific hint→category mapping, populated when --country is used.
+_country_hint_to_category: dict[str, str] = {}
+
+
 def _infer_column_categories(entity_name: str) -> set[str]:
     col = entity_name.split(".")[-1].lower()
     categories: set[str] = set()
@@ -194,6 +241,10 @@ def _infer_column_categories(entity_name: str) -> set[str]:
         categories.add("card")
     if "amount" in col or "balance" in col or "limit" in col:
         categories.add("amount")
+    # Country-specific patterns (populated by --country flag)
+    for hint, category in _country_hint_to_category.items():
+        if hint in col:
+            categories.add(category)
     return categories or {"generic"}
 
 
@@ -653,7 +704,26 @@ def main():
     )
     parser.add_argument("tfvars", help="Path to abac.auto.tfvars file")
     parser.add_argument("sql", nargs="?", help="Path to masking_functions.sql (optional)")
+    parser.add_argument(
+        "--country",
+        metavar="CODE",
+        help="Comma-separated region codes for country-specific column inference "
+             "(e.g. ANZ, IN, SEA). Extends column category detection with "
+             "region-specific identifier patterns. See shared/countries/.",
+    )
     args = parser.parse_args()
+
+    # ── Country/region overlay: extend column inference ──────────────────────
+    if args.country:
+        global _country_hint_to_category
+        country_codes = [c.strip().upper() for c in args.country.split(",") if c.strip()]
+        if country_codes:
+            hints, func_cats = _load_country_categories(country_codes)
+            _country_hint_to_category.update(hints)
+            FUNCTION_EXPECTED_CATEGORIES.update(func_cats)
+            if hints:
+                print(f"  Country overlays loaded: {', '.join(country_codes)} "
+                      f"({len(hints)} column hints, {len(func_cats)} function mappings)")
 
     tfvars_path = Path(args.tfvars).resolve()
     sql_path = Path(args.sql).resolve() if args.sql else None

@@ -3227,6 +3227,277 @@ genie_only = true
 
 
 # ---------------------------------------------------------------------------
+# Scenario: country-overlay — COUNTRY= parameter with APJ overlays
+# ---------------------------------------------------------------------------
+
+def scenario_country_overlay(
+    auth_file: Path,
+    warehouse_id: str,
+    keep_data: bool,
+    fresh_env: bool = False,
+) -> None:
+    """
+    Test the country/region overlay feature end-to-end.
+
+    Phase 1 — Schema setup:
+      Reuse dev_fin from quickstart and ALTER TABLE to add APJ-specific columns
+      (tax_file_number, medicare_number, aadhaar_number, nric) to the existing
+      finance.customers table.
+
+    Phase 2 — ANZ full cycle (generate → apply → verify):
+      Generate with COUNTRY=ANZ. Assert the generated output includes ANZ-specific
+      masking functions (mask_tfn, mask_medicare). Apply all layers. Verify that
+      column tags and masking policies were deployed to Databricks.
+
+    Phase 3 — IN generation check:
+      Regenerate with COUNTRY=IN. Assert India-specific terms (mask_aadhaar,
+      mask_pan_india) appear in generated output. Generation-only (no apply) to
+      keep FGAC quota usage low — Phase 2 already proved the deploy path works.
+
+    Phase 4 — SEA generation check:
+      Regenerate with COUNTRY=SEA. Assert SEA-specific terms (mask_nric, mask_mykad)
+      appear in generated output.
+
+    Phase 5 — Multi-region generation check:
+      Regenerate with COUNTRY=ANZ,IN,SEA. Assert all three overlay term sets present.
+
+    Phase 6 — Baseline generation check:
+      Regenerate without COUNTRY. Assert country-specific masking functions are
+      absent from the generated config files.
+
+    Phase 7 — Teardown:
+      Drop the APJ columns (best-effort), tear down catalogs + Terraform state.
+    """
+    _banner("Scenario: country-overlay — COUNTRY= with APJ overlays (ANZ deploy + IN/SEA gen)")
+    env = "dev"
+
+    _preamble_cleanup(env, fresh_env=fresh_env)
+
+    # ── Phase 1: Schema setup ────────────────────────────────────────────────
+    _step("Phase 1 — Creating dev_fin test catalog")
+    _setup_data(auth_file, warehouse_id=warehouse_id)
+
+    resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
+
+    _step("Phase 1 — Adding APJ columns to finance.customers")
+    apj_columns = [
+        ("tax_file_number",  "STRING COMMENT 'Australian Tax File Number (TFN)'"),
+        ("medicare_number",  "STRING COMMENT 'Australian Medicare card number'"),
+        ("bsb_number",       "STRING COMMENT 'Bank State Branch number (AU)'"),
+        ("aadhaar_number",   "STRING COMMENT 'Indian Aadhaar UID (12 digits)'"),
+        ("pan_number",       "STRING COMMENT 'Indian Permanent Account Number'"),
+        ("nric",             "STRING COMMENT 'Singapore NRIC'"),
+        ("mykad",            "STRING COMMENT 'Malaysian MyKad IC number'"),
+    ]
+    for col_name, col_def in apj_columns:
+        try:
+            _sdk_run_sql(
+                auth_file,
+                f"ALTER TABLE {DEV_FIN_CAT}.finance.customers ADD COLUMN {col_name} {col_def}",
+                warehouse_id=resolved_wh,
+            )
+        except Exception as e:
+            # Column may already exist from a previous partial run
+            if "already exists" in str(e).lower() or "COLUMN_ALREADY_EXISTS" in str(e):
+                print(f"  (column {col_name} already exists — skipping)")
+            else:
+                raise
+
+    _make("setup", f"ENV={env}")
+    _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
+
+    env_dir = ENVS_DIR / env
+    gen_dir = env_dir / "generated"
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _any_term_in_generated(terms: list[str], label: str) -> None:
+        """Assert at least one term from the list appears in generated output."""
+        files_to_check = [
+            gen_dir / "generated_response.md",
+            gen_dir / "abac.auto.tfvars",
+            gen_dir / "masking_functions.sql",
+        ]
+        all_content = ""
+        for f in files_to_check:
+            if f.exists():
+                all_content += f.read_text()
+        found = [t for t in terms if t in all_content]
+        if not found:
+            raise AssertionError(
+                f"None of {terms} found in generated output ({label}). "
+                f"Files checked: {[f.name for f in files_to_check if f.exists()]}"
+            )
+        print(f"  {_green('PASS')}  {label}: found {found[:3]} in generated output")
+
+    def _no_term_in_generated(terms: list[str], label: str) -> None:
+        """Assert none of the given terms appear in generated config files."""
+        files_to_check = [
+            gen_dir / "abac.auto.tfvars",
+            gen_dir / "masking_functions.sql",
+        ]
+        all_content = ""
+        for f in files_to_check:
+            if f.exists():
+                all_content += f.read_text()
+        found = [t for t in terms if t in all_content]
+        if found:
+            raise AssertionError(
+                f"Unexpected terms {found} found in generated output ({label}). "
+                f"Country-specific functions should not appear without COUNTRY= set."
+            )
+        print(f"  {_green('PASS')}  {label}: none of {terms[:3]}... in generated config")
+
+    ANZ_TERMS = ["mask_tfn", "mask_medicare", "mask_bsb",
+                 "TFN", "Medicare", "BSB", "tax_file_number", "medicare_number"]
+    IN_TERMS  = ["mask_aadhaar", "mask_pan_india",
+                 "Aadhaar", "aadhaar_number", "pan_number"]
+    SEA_TERMS = ["mask_nric", "mask_mykad",
+                 "NRIC", "MyKad", "nric", "mykad"]
+
+    # ── Phase 2: ANZ full cycle ──────────────────────────────────────────────
+    _step("Phase 2 — Generating with COUNTRY=ANZ")
+    _clean_env_artifacts(env)
+    _make("generate", f"ENV={env}", "COUNTRY=ANZ", retries=2)
+
+    _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (ANZ)")
+    _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated (ANZ)")
+    _any_term_in_generated(ANZ_TERMS, "ANZ overlay: country-specific terms in output")
+    _assert_contains(gen_dir / "masking_functions.sql", "mask_tfn",
+                     "mask_tfn function defined in SQL (ANZ)")
+
+    _step("Phase 2 — Applying all layers (ANZ)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+
+    _step("Phase 2 — Verifying ABAC governance deployed (ANZ)")
+    _assert_genie_space_id_file(env, "Finance Analytics")
+    _verify_data(auth_file, dev=True, warehouse_id=resolved_wh)
+
+    # Destroy governance before next region to free FGAC policy slots
+    _step("Phase 2 — Destroying governance (free FGAC quota for next region)")
+    _try_destroy(env)
+    _try_destroy_account()
+
+    # ── Phase 3: IN full cycle ───────────────────────────────────────────────
+    _step("Phase 3 — Generating with COUNTRY=IN")
+    _clean_env_artifacts(env)
+    _make("setup", f"ENV={env}")
+    _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
+    _make("generate", f"ENV={env}", "COUNTRY=IN", retries=2)
+
+    _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (IN)")
+    _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated (IN)")
+    _any_term_in_generated(IN_TERMS, "India overlay: country-specific terms in output")
+    _assert_contains(gen_dir / "masking_functions.sql", "mask_aadhaar",
+                     "mask_aadhaar function defined in SQL (IN)")
+
+    _step("Phase 3 — Applying all layers (IN)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+
+    _step("Phase 3 — Verifying ABAC governance deployed (IN)")
+    _assert_genie_space_id_file(env, "Finance Analytics")
+    _verify_data(auth_file, dev=True, warehouse_id=resolved_wh)
+
+    _step("Phase 3 — Destroying governance (free FGAC quota for next region)")
+    _try_destroy(env)
+    _try_destroy_account()
+
+    # ── Phase 4: SEA full cycle ──────────────────────────────────────────────
+    _step("Phase 4 — Generating with COUNTRY=SEA")
+    _clean_env_artifacts(env)
+    _make("setup", f"ENV={env}")
+    _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
+    _make("generate", f"ENV={env}", "COUNTRY=SEA", retries=2)
+
+    _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (SEA)")
+    _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated (SEA)")
+    _any_term_in_generated(SEA_TERMS, "SEA overlay: country-specific terms in output")
+    _assert_contains(gen_dir / "masking_functions.sql", "mask_nric",
+                     "mask_nric function defined in SQL (SEA)")
+
+    _step("Phase 4 — Applying all layers (SEA)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+
+    _step("Phase 4 — Verifying ABAC governance deployed (SEA)")
+    _assert_genie_space_id_file(env, "Finance Analytics")
+    _verify_data(auth_file, dev=True, warehouse_id=resolved_wh)
+
+    _step("Phase 4 — Destroying governance (free FGAC quota for next phase)")
+    _try_destroy(env)
+    _try_destroy_account()
+
+    # ── Phase 5: Multi-region generation + apply ─────────────────────────────
+    _step("Phase 5 — Generating with COUNTRY=ANZ,IN,SEA (multi-region)")
+    _clean_env_artifacts(env)
+    _make("setup", f"ENV={env}")
+    _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
+    _make("generate", f"ENV={env}", "COUNTRY=ANZ,IN,SEA", retries=2)
+
+    _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (multi)")
+    _any_term_in_generated(ANZ_TERMS, "Multi-region: ANZ terms in output")
+    _any_term_in_generated(IN_TERMS, "Multi-region: India terms in output")
+    _any_term_in_generated(SEA_TERMS, "Multi-region: SEA terms in output")
+
+    _step("Phase 5 — Applying all layers (multi-region)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+
+    _step("Phase 5 — Verifying ABAC governance deployed (multi-region)")
+    _assert_genie_space_id_file(env, "Finance Analytics")
+    _verify_data(auth_file, dev=True, warehouse_id=resolved_wh)
+
+    _step("Phase 5 — Destroying governance (free FGAC quota for baseline)")
+    _try_destroy(env)
+    _try_destroy_account()
+
+    # ── Phase 6: Baseline (no COUNTRY) ───────────────────────────────────────
+    _step("Phase 6 — Generating without COUNTRY (baseline)")
+    _clean_env_artifacts(env)
+    _make("setup", f"ENV={env}")
+    _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
+    _make("generate", f"ENV={env}", retries=2)
+
+    _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (baseline)")
+    _no_term_in_generated(
+        ["mask_tfn", "mask_aadhaar", "mask_nric", "mask_mykad",
+         "mask_medicare", "mask_pan_india", "mask_gstin"],
+        "Baseline: no country-specific masking functions",
+    )
+
+    # ── Phase 7: Teardown ────────────────────────────────────────────────────
+    # Best-effort: drop the APJ columns we added (leave table otherwise intact
+    # for other scenarios that may run after us).
+    if not keep_data:
+        _step("Phase 7 — Cleaning up APJ columns (best-effort)")
+        for col_name, _ in apj_columns:
+            # Must unset tags before DROP COLUMN
+            for key in ["pii_level", "phi_level", "pci_level", "financial_sensitivity",
+                        "compliance_scope", "aml_scope"]:
+                try:
+                    _sdk_run_sql(
+                        auth_file,
+                        f"ALTER TABLE {DEV_FIN_CAT}.finance.customers "
+                        f"ALTER COLUMN {col_name} UNSET TAGS ('{key}')",
+                        warehouse_id=resolved_wh,
+                    )
+                except Exception:
+                    pass
+            try:
+                _sdk_run_sql(
+                    auth_file,
+                    f"ALTER TABLE {DEV_FIN_CAT}.finance.customers DROP COLUMN {col_name}",
+                    warehouse_id=resolved_wh,
+                )
+            except Exception as e:
+                print(f"  WARN  Could not drop {col_name}: {e}")
+
+        _teardown_data("--teardown", auth_file=auth_file, warehouse_id=resolved_wh)
+        _try_destroy(env)
+        _try_destroy_account()
+
+    print(f"\n  {_green(_bold('PASSED'))}  country-overlay")
+
+
+# ---------------------------------------------------------------------------
 # Scenario registry
 # ---------------------------------------------------------------------------
 
@@ -3243,6 +3514,7 @@ SCENARIOS: dict[str, tuple[str, Callable]] = {
     "multi-space-import":   ("Import two UI-created Genie Spaces in one make generate",          scenario_multi_space_import),
     "schema-drift":    ("Column tag drift detection after ADD/DROP/RENAME COLUMN",           scenario_schema_drift),
     "genie-only":      ("Genie-only mode (genie_only=true, no account-level resources)",    scenario_genie_only),
+    "country-overlay": ("Country/region overlays (ANZ, IN, SEA) — generation only",         scenario_country_overlay),
 }
 
 

@@ -61,6 +61,7 @@ DEFAULT_ENV_FILE = WORK_DIR / "env.auto.tfvars"
 REQUIRED_PACKAGES = {
     "python-hcl2": "hcl2",
     "databricks-sdk": "databricks.sdk",
+    "pyyaml": "yaml",
 }
 
 
@@ -87,6 +88,52 @@ def _ensure_packages():
 
 
 _ensure_packages()
+
+COUNTRIES_DIR = SCRIPT_DIR / "countries"
+
+
+def load_country_overlays(country_codes: list[str]) -> str:
+    """Load country/region YAML overlays and return combined prompt text.
+
+    Each code maps to a YAML file in shared/countries/ (e.g. "ANZ" -> ANZ.yaml).
+    Returns the concatenated prompt_overlay text plus formatted masking function
+    signatures, ready for injection into the LLM prompt.
+    """
+    import yaml
+
+    parts: list[str] = []
+    total_identifiers = 0
+
+    for code in country_codes:
+        code_upper = code.strip().upper()
+        yaml_path = COUNTRIES_DIR / f"{code_upper}.yaml"
+        if not yaml_path.exists():
+            available = sorted(
+                p.stem for p in COUNTRIES_DIR.glob("*.yaml") if not p.stem.startswith("_")
+            )
+            print(f"  ERROR: Country overlay file not found: {yaml_path}")
+            print(f"  Available: {', '.join(available) or '(none)'}")
+            sys.exit(1)
+
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f)
+
+        overlay_name = data.get("name", code_upper)
+        identifiers = data.get("identifiers", [])
+        prompt_overlay = data.get("prompt_overlay", "")
+        total_identifiers += len(identifiers)
+
+        if prompt_overlay:
+            parts.append(prompt_overlay.rstrip())
+
+        print(f"  Country overlay: {code_upper} ({overlay_name}) — "
+              f"{len(identifiers)} identifier(s), "
+              f"{len(data.get('masking_functions', []))} masking function(s)")
+
+    if not parts:
+        return ""
+
+    return "\n\n".join(parts) + "\n"
 
 
 def _load_tfvars(path: Path, label: str) -> dict:
@@ -602,8 +649,13 @@ def build_prompt(ddl_text: str,
                  group_names: list[str] | None = None,
                  per_space_name: str | None = None,
                  space_names: list[str] | None = None,
-                 mode: str = "full") -> str:
+                 mode: str = "full",
+                 countries: list[str] | None = None) -> str:
     """Build the full prompt by injecting DDL and optional group names into the template.
+
+    When countries is set, country-specific identifier overlays are loaded from
+    shared/countries/ and injected into the prompt to teach the LLM about
+    region-specific masking patterns and regulatory context.
 
     When per_space_name is set, an extra instruction is injected telling the LLM
     to generate ONLY config for that specific space (skip groups and tag_policies,
@@ -697,14 +749,19 @@ def build_prompt(ddl_text: str,
             "The SQL code block should be empty or omitted.\n\n"
         )
 
+    country_instruction = ""
+    if countries:
+        country_instruction = load_country_overlays(countries)
+
     if idx == -1:
         print("WARNING: Could not find '### MY TABLES' in ABAC_PROMPT.md")
         print("  Appending DDL at the end of the prompt instead.\n")
-        prompt = template + f"\n\n{per_space_instruction}{groups_lines}{space_names_lines}{cs_lines}\n\n{ddl_text}\n"
+        prompt = template + f"\n\n{per_space_instruction}{country_instruction}{groups_lines}{space_names_lines}{cs_lines}\n\n{ddl_text}\n"
     else:
         prompt_body = template[:idx].rstrip()
         user_input = (
             f"\n\n{per_space_instruction}"
+            f"{country_instruction}"
             f"{groups_lines}"
             f"{space_names_lines}"
             f"### MY TABLES\n\n"
@@ -3556,6 +3613,14 @@ def main():
         ),
     )
     parser.add_argument(
+        "--country",
+        metavar="CODE",
+        help="Comma-separated region codes for country-specific identifier awareness "
+             "(e.g. ANZ, IN, SEA). Injects masking patterns and regulatory context for "
+             "the specified regions into the LLM prompt. Overrides the 'country' field "
+             "in env.auto.tfvars if both are set. See shared/countries/ for available overlays.",
+    )
+    parser.add_argument(
         "--mode",
         choices=["full", "governance", "genie"],
         default="full",
@@ -3598,6 +3663,17 @@ def main():
     print("=" * 60)
 
     auth_cfg = load_auth_config(auth_file)
+
+    # ── Country/region overlay: resolve from CLI --country or env config ─────
+    # Priority: CLI --country > env.auto.tfvars country field > empty (global)
+    country_raw = args.country or auth_cfg.get("country", "")
+    countries: list[str] | None = None
+    if country_raw:
+        countries = [c.strip().upper() for c in country_raw.split(",") if c.strip()]
+        if countries:
+            print(f"  Country: {', '.join(countries)}")
+        else:
+            countries = None
 
     # ── Per-space mode: resolve the target space and redirect out_dir ────────
     # When --space is given, we only generate config for that one space.
@@ -3796,6 +3872,7 @@ def main():
         per_space_name=args.space if args.space else None,
         space_names=configured_space_names,
         mode=args.mode,
+        countries=countries,
     )
 
     if args.dry_run:
