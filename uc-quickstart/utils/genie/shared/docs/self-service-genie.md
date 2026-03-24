@@ -214,6 +214,51 @@ make apply-genie ENV=bu_finance_prod
 
 Governance runs separately for the prod environment — the promotion only carries `genie_space_configs`, not ABAC.
 
+### Import an existing Genie Space to prod (no ABAC)
+
+If a data team has already created a Genie Space in the UI and you want to bring it to prod without managing any ABAC governance (because a central team handles that separately), use the genie-only import workflow:
+
+```bash
+# 1. Set up a new env
+make setup ENV=bu_import
+
+# 2. Write env.auto.tfvars with genie_only = true and the existing space's ID
+cat > envs/bu_import/env.auto.tfvars <<'EOF'
+genie_only = true
+
+genie_spaces = [
+  {
+    name           = "Finance Analytics"
+    genie_space_id = "<existing-space-id>"
+    uc_tables = [
+      "dev_catalog.finance.customers",
+      "dev_catalog.finance.transactions",
+    ]
+  },
+]
+
+sql_warehouse_id = "<warehouse-id>"
+EOF
+
+# 3. Generate genie config only (no ABAC)
+make generate ENV=bu_import MODE=genie
+
+# 4. Apply workspace layer
+make apply-genie ENV=bu_import
+
+# 5. Promote to prod — remaps genie config or gracefully skips ABAC
+make promote SOURCE_ENV=bu_import DEST_ENV=bu_import_prod \
+  DEST_CATALOG_MAP="dev_catalog=prod_catalog"
+
+# 6. If promote skipped (no generated/abac.auto.tfvars), set up prod manually:
+make setup ENV=bu_import_prod
+# Write prod env.auto.tfvars with remapped catalogs, then:
+make generate ENV=bu_import_prod MODE=genie
+make apply-genie ENV=bu_import_prod
+```
+
+> **Tested:** The `genie-import-no-abac` integration test (`make test-genie-import-no-abac`) validates this exact workflow end-to-end — creating a space via API, importing it with `genie_only=true`, generating with `MODE=genie`, promoting to prod, and asserting that no governance artifacts (tags, FGAC policies, masking functions) are produced at any stage.
+
 ---
 
 ## FAQ

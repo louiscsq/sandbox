@@ -15,6 +15,7 @@ This document covers the main use cases for deploying and managing Genie Spaces 
 | [E. Promote dev → prod](#scenario-e-promote-dev--prod) | Replicate dev governance to prod with renamed catalogs | `make promote` → `make apply ENV=prod` |
 | [F. Independent BU environment](#scenario-f-create-an-independent-bu-environment) | BU needs its own groups, governance, and Genie spaces | `make setup ENV=bu2` → `make generate ENV=bu2` → `make apply ENV=bu2` |
 | [G. Central governance, self-service Genie](#scenario-g-central-governance-self-service-genie) | Central ABAC team + BU teams self-serve Genie spaces | `make generate MODE=governance` / `make generate MODE=genie` |
+| [H. Import Genie Space to prod (no ABAC)](#scenario-h-import-genie-space-to-prod-without-abac) | Import a UI-created Genie Space and deploy to prod when ABAC is managed separately | `make generate MODE=genie` (with `genie_space_id` + `genie_only=true`) → `make apply-genie` → `make promote` |
 
 ### How layers are applied
 
@@ -549,6 +550,62 @@ make destroy-genie ENV=bu2
 make destroy-governance ENV=governance
 make destroy ENV=account
 ```
+
+---
+
+## Scenario H: Import Genie Space to prod without ABAC
+
+Use this when a data team has already created a Genie Space in the Databricks UI and you want to deploy it to production **without generating or managing any ABAC governance** — because a separate governance team handles tags, FGAC policies, and masking functions centrally.
+
+This combines `genie_only = true` (from [§ G](#scenario-g-central-governance-self-service-genie)) with `genie_space_id` import (from [§ C](#scenario-c-import-an-existing-genie-space-govern--promote)) and the promote workflow (from [§ E](#scenario-e-promote-dev--prod)).
+
+### Steps
+
+```bash
+# 1. Set up a new BU environment
+make setup ENV=bu_import
+
+# 2. Configure env.auto.tfvars:
+#    - genie_only = true (no account-level resources)
+#    - genie_space_id = "<existing-space-id>" (import, don't create)
+#    - uc_tables = [...] (tables the space queries)
+#    - sql_warehouse_id = "<warehouse-id>" (BYO warehouse required in genie_only mode)
+vi envs/bu_import/env.auto.tfvars
+
+# 3. Set up auth (BU team's service principal — only needs workspace USER + SQL entitlement)
+vi envs/bu_import/auth.auto.tfvars
+
+# 4. Generate genie config only (no ABAC generation)
+make generate ENV=bu_import MODE=genie
+
+# 5. Apply workspace layer only
+make apply-genie ENV=bu_import
+
+# 6. Promote to prod
+#    `make promote` remaps genie config or gracefully skips when no
+#    generated/abac.auto.tfvars exists.
+make promote SOURCE_ENV=bu_import DEST_ENV=bu_import_prod \
+  DEST_CATALOG_MAP="dev_catalog=prod_catalog"
+
+# If promote printed "Skipping promote (genie-only workflow)", configure prod manually:
+make setup ENV=bu_import_prod
+vi envs/bu_import_prod/env.auto.tfvars   # same as dev but with prod catalog names
+make generate ENV=bu_import_prod MODE=genie
+vi envs/bu_import_prod/auth.auto.tfvars   # prod workspace credentials
+make apply-genie ENV=bu_import_prod
+```
+
+### What this workflow does NOT create
+
+- No tag policies or tag assignments
+- No FGAC policies
+- No masking functions
+- No account-level resources (groups, workspace assignments)
+- No `data_access/terraform.tfstate`
+
+All governance is managed separately by the central team via `make apply-governance`.
+
+> **Tested:** `make test-genie-import-no-abac` validates this workflow end-to-end. See [integration-testing.md](integration-testing.md) for details.
 
 ---
 

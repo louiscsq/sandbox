@@ -20,7 +20,7 @@ This single command runs the full pipeline in order:
 
 1. **Unit tests** — fast Python-only checks, no cloud resources needed
 2. **Provision** — fresh isolated Databricks workspace + metastore (~10–15 min)
-3. **Integration tests** — all 11 scenarios (~90 min)
+3. **Integration tests** — all scenarios (~90 min)
 4. **Teardown** — always runs, even if tests fail, so no cloud resources are left behind
 
 Exit code is non-zero if any phase fails. Teardown is **always** executed.
@@ -335,6 +335,9 @@ the next one starts.
 | **abac-only** | § 2 | ABAC governance only (no Genie Space) + §2→§4 upgrade path: add Genie Space later without disturbing governance |
 | **multi-space-import** | § 3 (multi-space) | Import two UI-configured Genie Spaces in one `make generate`; assert both configs present, Terraform creates no new spaces |
 | **schema-drift** | — | Detects and classifies new columns after initial ABAC deployment; tests `make audit-schema` and `make generate-delta` across ADD/DROP/RENAME COLUMN scenarios |
+| **genie-only** | § 7 (genie\_only) | Minimal-privilege SP (workspace USER + SQL entitlement) creates Genie Space with `genie_only=true`; no account-level resources |
+| **genie-import-no-abac** | § 3 + § 7 | Import an existing Genie Space and deploy to prod **without any ABAC governance** — validates the genie-only import-to-prod workflow when a separate team manages ABAC centrally |
+| **country-overlay** | — | Country/region overlays (ANZ, IN, SEA) — generation only, no apply |
 
 ---
 
@@ -398,6 +401,9 @@ make test-attach-promote
 make test-self-service-genie
 make test-abac-only
 make test-multi-space-import
+make test-genie-only
+make test-genie-import-no-abac
+make test-country-overlay
 
 # All targets accept WAREHOUSE_ID= and KEEP_DATA=1
 make test-promote WAREHOUSE_ID=abc123ef KEEP_DATA=1
@@ -749,6 +755,33 @@ Tags are unset on `email`, then `ALTER TABLE RENAME COLUMN email TO contact_emai
 | 14 | `make generate-delta` — old removed, new classified |
 | 15 | `make apply` — assert tag on `contact_email` |
 | 16 | `make audit-schema` — assert exit 0 |
+
+### 10. genie-import-no-abac — Import Genie Space, deploy to prod without ABAC
+
+Validates the full workflow of importing an existing Genie Space and deploying it to production without generating or managing any ABAC governance. This is a valid use case when a separate governance team manages ABAC centrally.
+
+**Steps:**
+
+| Step | Action |
+|---|---|
+| 1 | Create `dev_fin` + `prod_fin` test catalogs |
+| 2 | Create a Genie Space via REST API (simulating a UI-configured space) |
+| 3 | `make setup ENV=import_noabac` — scaffold env |
+| 4 | Write `env.auto.tfvars` with `genie_only = true` and `genie_space_id` pointing to the API-created space |
+| 5 | `make generate ENV=import_noabac MODE=genie` — generate genie config only |
+| 6 | Assert: `genie_space_configs` present, `tag_assignments` / `fgac_policies` absent, no `masking_functions.sql` |
+| 7 | `make apply-genie ENV=import_noabac` — deploy workspace layer |
+| 8 | Assert: no `.genie_space_id_*` file (space attached, not created); space accessible via API |
+| 9 | `make promote SOURCE_ENV=import_noabac DEST_ENV=import_noabac_prod DEST_CATALOG_MAP=dev_fin=prod_fin` — promote remaps genie config or gracefully skips |
+| 10 | `make apply-genie ENV=import_noabac_prod` — deploy prod workspace |
+| 11 | Assert: no `data_access/terraform.tfstate`, no account resources, no `masking_functions.sql`, no `tag_assignments` / `fgac_policies` |
+
+**Key assertions:**
+
+- Imported space is attached (not created) — no `.genie_space_id_*` in dev env; space verified via API
+- `make promote` either remaps genie config or exits 0 with a skip message (not a hard error)
+- No governance artifacts are produced at any stage
+- Only the workspace layer is managed — no account or data_access state
 
 ---
 

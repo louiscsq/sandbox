@@ -223,9 +223,8 @@ promote: _bootstrap _guard-workspace-target ## Split generated/ into layers (sam
 			echo "ERROR: SOURCE_ENV must be a workspace environment, not $(SOURCE_ENV)."; exit 1; \
 		fi; \
 		if [ ! -f "$(SOURCE_ENV_DIR)/generated/abac.auto.tfvars" ]; then \
-			echo "ERROR: No $(SOURCE_ENV_DIR)/generated/abac.auto.tfvars found."; \
-			echo "  Run 'make generate$(if $(filter $(SOURCE_ENV),$(DEFAULT_ENV)),, ENV=$(SOURCE_ENV))' first."; \
-			exit 1; \
+			echo "=== Skipping promote (no $(SOURCE_ENV_DIR)/generated/abac.auto.tfvars — genie-only workflow) ==="; \
+			exit 0; \
 		fi; \
 		if [ -z "$(DEST_CATALOG_MAP)" ]; then \
 			src_catalogs=$$(python3 -c " \
@@ -270,7 +269,8 @@ print(', '.join(cats) if cats else '(none detected)') \
 			echo "ERROR: SOURCE_ENV must be a workspace environment, not $(SOURCE_ENV)."; exit 1; \
 		fi; \
 		if [ ! -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
-			echo "No $(ENV_DIR)/generated/abac.auto.tfvars found. Run 'make generate$(if $(filter $(ENV),$(DEFAULT_ENV)),, ENV=$(ENV))' first."; exit 1; \
+			echo "=== Skipping promote (no $(ENV_DIR)/generated/abac.auto.tfvars — genie-only workflow) ==="; \
+			exit 0; \
 		fi; \
 		echo "=== Split generated/ to account + data_access + workspace ($(ENV)) ==="; \
 		if [ -f "$(ENV_DIR)/generated/masking_functions.sql" ]; then \
@@ -568,6 +568,12 @@ test-genie-only: _bootstrap _guard-workspace-target ## Scenario: genie_only=true
 test-country-overlay: _bootstrap _guard-workspace-target ## Scenario: country/region overlays (ANZ, IN, SEA) — generation only, no apply
 	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario country-overlay \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-genie-import-no-abac: _bootstrap _guard-workspace-target ## Scenario: import existing Genie, deploy to prod without ABAC
+	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario genie-import-no-abac \
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 

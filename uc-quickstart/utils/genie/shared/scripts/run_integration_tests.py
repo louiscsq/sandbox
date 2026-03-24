@@ -55,6 +55,12 @@ Scenarios
                    imports both via genie_space_id entries, asserts both genie_space_configs
                    present, no new spaces created by Terraform.
 
+  genie-import-no-abac
+                   Import an existing Genie Space and deploy to prod without ABAC.
+                   Creates a space via API, imports it with genie_only=true, runs
+                   MODE=genie generation, promotes to prod (graceful skip or remap),
+                   applies workspace layer. Asserts no governance artifacts produced.
+
   all              Run all scenarios sequentially (default when no --scenario given).
 
 Usage
@@ -90,6 +96,7 @@ Makefile targets (added by this PR)
   make test-self-service-genie
   make test-abac-only
   make test-multi-space-import
+  make test-genie-import-no-abac
   make test-all
 """
 
@@ -3227,6 +3234,241 @@ genie_only = true
 
 
 # ---------------------------------------------------------------------------
+# Scenario: genie-import-no-abac — Import Genie Space, deploy to prod, no ABAC
+# ---------------------------------------------------------------------------
+
+def scenario_genie_import_no_abac(
+    auth_file: Path,
+    warehouse_id: str,
+    keep_data: bool,
+    fresh_env: bool = False,
+) -> None:
+    """
+    Import an existing Genie Space and deploy to prod without generating or
+    managing any ABAC governance.  This validates the genie-only import-to-prod
+    workflow when a separate governance team manages ABAC centrally.
+
+    Phase 1 — Data setup:
+      Create dev_fin + prod_fin test catalogs.
+
+    Phase 2 — Create initial Genie Space via API:
+      Simulates a UI-configured space that a data team already set up.
+
+    Phase 3 — Import into fresh env without ABAC:
+      make setup ENV=import_noabac
+      Write env.auto.tfvars with genie_only = true and genie_spaces pointing
+      to the created space (genie_space_id).
+      make generate MODE=genie ENV=import_noabac — generate genie config only.
+
+    Phase 4 — Promote to prod (the key test):
+      make promote SOURCE_ENV=import_noabac DEST_ENV=import_noabac_prod
+                   DEST_CATALOG_MAP=dev_fin=prod_fin
+      Assert promote completes (graceful skip or success with genie config).
+      make apply-genie ENV=import_noabac_prod
+
+    Phase 5 — Assertions:
+      Dev: no .genie_space_id_* (attached, not created); space accessible via API.
+      Prod: workspace applied successfully (space attached or created).
+      No data_access/terraform.tfstate in prod env.
+      No account-level resources created.
+      No masking_functions.sql generated.
+      Generated config has no tag_assignments, fgac_policies.
+
+    Phase 6 — Teardown.
+    """
+    _banner("Scenario: genie-import-no-abac — Import Genie, deploy to prod without ABAC")
+    src_env  = "import_src"
+    env      = "import_noabac"
+    prod_env = "import_noabac_prod"
+
+    _ensure_packages()
+
+    # ── Phase 1: Data setup ───────────────────────────────────────────────────
+    _preamble_cleanup(src_env, env, prod_env, fresh_env=fresh_env)
+
+    _step("Phase 1 — Creating dev_fin + prod_fin test catalogs")
+    _setup_data(auth_file, "--prod", warehouse_id=warehouse_id)
+
+    resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
+
+    # ── Phase 2: Create a Genie Space via API (simulating UI-configured space) ──
+    _step("Phase 2 — Creating Genie Space via API (simulating existing UI-created space)")
+    fin_tables = [
+        f"{DEV_FIN_CAT}.finance.customers",
+        f"{DEV_FIN_CAT}.finance.transactions",
+        f"{DEV_FIN_CAT}.finance.credit_cards",
+    ]
+    src_space_id = _create_genie_space_via_api(
+        auth_file, title="Finance Analytics", tables=fin_tables, warehouse_id=resolved_wh,
+    )
+
+    # ── Phase 3: Import into fresh env without ABAC ───────────────────────────
+    _step("Phase 3 — Setting up import_noabac env (genie_only, no ABAC)")
+    _make("setup", f"ENV={env}")
+
+    env_dir = ENVS_DIR / env
+    wh_line = f'sql_warehouse_id = "{resolved_wh}"' if resolved_wh else 'sql_warehouse_id = ""'
+
+    import_hcl = f"""\
+genie_only = true
+
+genie_spaces = [
+  {{
+    name           = "Finance Analytics"
+    genie_space_id = "{src_space_id}"
+    uc_tables = [
+      "{DEV_FIN_CAT}.finance.customers",
+      "{DEV_FIN_CAT}.finance.transactions",
+      "{DEV_FIN_CAT}.finance.credit_cards",
+    ]
+  }},
+]
+
+{wh_line}
+"""
+    (env_dir / "env.auto.tfvars").write_text(import_hcl)
+    _copy_auth("dev", env)
+
+    _step("Phase 3 — Generating Genie config (MODE=genie, no ABAC)")
+    _make("generate", f"ENV={env}", "MODE=genie", retries=2)
+
+    gen_dir = env_dir / "generated"
+    gen_abac = gen_dir / "abac.auto.tfvars"
+    _assert_file_exists(gen_abac, f"{env}/generated/abac.auto.tfvars created")
+    _assert_contains(gen_abac, "genie_space_configs",
+                     "genie_space_configs present in import_noabac output")
+    for section in ("tag_assignments", "fgac_policies"):
+        _assert_not_declared_hcl(gen_abac, section,
+                                 f"'{section}' not declared in import_noabac output (genie mode)")
+
+    gen_sql = gen_dir / "masking_functions.sql"
+    if gen_sql.exists():
+        raise AssertionError(
+            f"masking_functions.sql was generated in '{env}' env — expected none in genie-only mode."
+        )
+    print(f"  {_green('PASS')}  No masking_functions.sql in '{env}' — genie-only, no ABAC")
+
+    _step("Phase 3 — Applying workspace layer (make apply-genie)")
+    _make("apply-genie", f"ENV={env}", retries=3, retry_delay_seconds=120)
+
+    # Space was imported (attached via genie_space_id), not created — no .genie_space_id_* file
+    _step("Asserting space NOT created by Terraform (attached via genie_space_id)")
+    id_files = list((ENVS_DIR / env).glob(".genie_space_id_*"))
+    legacy = ENVS_DIR / env / ".genie_space_id"
+    if id_files or legacy.exists():
+        raise AssertionError(
+            f"Terraform created a new Genie Space in '{env}' — expected none. "
+            "The imported space (genie_space_id) should be attached, not created."
+        )
+    print(f"  {_green('PASS')}  No .genie_space_id_* file in '{env}' — space correctly attached, not created")
+
+    # Verify the imported space is accessible via API
+    _step("Verifying imported Genie Space accessible via API")
+    from databricks.sdk import WorkspaceClient as _WC
+    _cfg = _load_auth_cfg(auth_file)
+    _configure_sdk_env(_cfg)
+    _w = _WC(product="genierails-test-runner", product_version="0.1.0")
+    try:
+        resp = _w.api_client.do("GET", f"/api/2.0/genie/spaces/{src_space_id}")
+        api_title = resp.get("title", "")
+        print(f"  {_green('PASS')}  Genie Space {src_space_id} accessible via API (title: {api_title!r})")
+    except Exception as exc:
+        raise AssertionError(f"Imported Genie Space {src_space_id} not accessible via API: {exc}")
+
+    # ── Phase 4: Promote to prod (the key test) ──────────────────────────────
+    _step(f"Phase 4 — Promoting {env} → {prod_env} (no ABAC to remap)")
+    _make(
+        "promote",
+        f"SOURCE_ENV={env}",
+        f"DEST_ENV={prod_env}",
+        f"DEST_CATALOG_MAP={DEV_FIN_CAT}={PROD_FIN_CAT}",
+    )
+
+    # Promote may succeed (remapping genie_space_configs) or gracefully skip
+    # (no generated/abac.auto.tfvars).  Either way, set up prod and apply.
+    prod_env_dir = ENVS_DIR / prod_env
+    if not (prod_env_dir / "env.auto.tfvars").exists():
+        # promote gracefully skipped — set up prod env manually
+        _step("Phase 4 — Promote skipped (no ABAC); configuring prod env manually")
+        _make("setup", f"ENV={prod_env}")
+
+        prod_hcl = f"""\
+genie_only = true
+
+genie_spaces = [
+  {{
+    name           = "Finance Analytics"
+    uc_tables = [
+      "{PROD_FIN_CAT}.finance.customers",
+      "{PROD_FIN_CAT}.finance.transactions",
+      "{PROD_FIN_CAT}.finance.credit_cards",
+    ]
+  }},
+]
+
+{wh_line}
+"""
+        (prod_env_dir / "env.auto.tfvars").write_text(prod_hcl)
+        _make("generate", f"ENV={prod_env}", "MODE=genie", retries=2)
+
+    _copy_auth("dev", prod_env)
+
+    _step("Phase 4 — Applying prod workspace layer (make apply-genie)")
+    _make("apply-genie", f"ENV={prod_env}", retries=3, retry_delay_seconds=120)
+
+    # ── Phase 5: Assertions ───────────────────────────────────────────────────
+    _step("Phase 5 — Asserting genie-import-no-abac deployment")
+
+    # 5a. Prod workspace applied — space may be attached (promoted genie_space_id)
+    # or newly created (manual setup without genie_space_id).  Either is valid.
+    prod_id_files = list(prod_env_dir.glob(".genie_space_id_*"))
+    if prod_id_files:
+        print(f"  {_green('PASS')}  .genie_space_id_* file present in '{prod_env}' env: "
+              + ", ".join(f.name for f in prod_id_files))
+    else:
+        print(f"  {_green('PASS')}  No .genie_space_id_* in '{prod_env}' — space attached via promoted genie_space_id")
+
+    # 5b. No data_access/terraform.tfstate in prod env
+    da_state = prod_env_dir / "data_access" / "terraform.tfstate"
+    if da_state.exists():
+        raise AssertionError(
+            f"apply-genie wrote a data_access/terraform.tfstate in '{prod_env}' env — expected none. "
+            "genie-only import workflow should only manage the workspace layer."
+        )
+    print(f"  {_green('PASS')}  No data_access/terraform.tfstate in '{prod_env}' — workspace layer only")
+
+    # 5c. No account-level resources created
+    _assert_state_no_account_resources(prod_env)
+
+    # 5d. No masking_functions.sql in prod generated
+    prod_gen_sql = prod_env_dir / "generated" / "masking_functions.sql"
+    if prod_gen_sql.exists():
+        raise AssertionError(
+            f"masking_functions.sql exists in '{prod_env}/generated/' — expected none."
+        )
+    print(f"  {_green('PASS')}  No masking_functions.sql in '{prod_env}' — no ABAC governance")
+
+    # 5e. Generated config has no tag_assignments, fgac_policies
+    prod_gen_abac = prod_env_dir / "generated" / "abac.auto.tfvars"
+    if prod_gen_abac.exists():
+        for section in ("tag_assignments", "fgac_policies"):
+            _assert_not_declared_hcl(prod_gen_abac, section,
+                                     f"'{section}' not declared in prod generated config")
+
+    # ── Phase 6: Teardown ─────────────────────────────────────────────────────
+    if not keep_data:
+        _teardown_data("--teardown", "--teardown-prod", auth_file=auth_file,
+                       warehouse_id=resolved_wh)
+        _try_destroy(prod_env)
+        _try_destroy(env)
+        _try_destroy(src_env)
+        _try_destroy_account()
+        _delete_genie_space_via_api(auth_file, src_space_id)
+
+    print(f"\n  {_green(_bold('PASSED'))}  genie-import-no-abac")
+
+
+# ---------------------------------------------------------------------------
 # Scenario: country-overlay — COUNTRY= parameter with APJ overlays
 # ---------------------------------------------------------------------------
 
@@ -3509,6 +3751,7 @@ SCENARIOS: dict[str, tuple[str, Callable]] = {
     "schema-drift":    ("Column tag drift detection after ADD/DROP/RENAME COLUMN",           scenario_schema_drift),
     "genie-only":      ("Genie-only mode (genie_only=true, no account-level resources)",    scenario_genie_only),
     "country-overlay": ("Country/region overlays (ANZ, IN, SEA) — generation only",         scenario_country_overlay),
+    "genie-import-no-abac": ("Import Genie Space, deploy to prod without ABAC",            scenario_genie_import_no_abac),
 }
 
 
