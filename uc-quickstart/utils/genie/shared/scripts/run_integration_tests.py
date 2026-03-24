@@ -3678,17 +3678,9 @@ def scenario_country_overlay(
     _any_term_in_generated(ANZ_TERMS, "Multi-region: ANZ terms in output")
     _any_term_in_generated(IN_TERMS, "Multi-region: India terms in output")
     _any_term_in_generated(SEA_TERMS, "Multi-region: SEA terms in output")
-
-    _step("Phase 5 — Applying all layers (multi-region)")
-    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
-
-    _step("Phase 5 — Verifying ABAC governance deployed (multi-region)")
-    _assert_genie_space_id_file(env, "Finance Analytics")
-    _verify_data(auth_file, dev=True, warehouse_id=resolved_wh)
-
-    _step("Phase 5 — Destroying governance (free FGAC quota for baseline)")
-    _try_destroy(env)
-    _try_destroy_account()
+    # Skip apply for multi-region — Phases 2-4 already proved each region
+    # deploys individually. Phase 5 only validates all three overlays combine
+    # correctly in a single generation pass.
 
     # ── Phase 6: Baseline (no COUNTRY) ───────────────────────────────────────
     _step("Phase 6 — Generating without COUNTRY (baseline)")
