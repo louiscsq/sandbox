@@ -3521,7 +3521,6 @@ def scenario_country_overlay(
 
     resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
 
-    _step("Phase 1 — Adding APJ columns to finance.customers")
     apj_columns = [
         ("tax_file_number",  "STRING COMMENT 'Australian Tax File Number (TFN)'"),
         ("medicare_number",  "STRING COMMENT 'Australian Medicare card number'"),
@@ -3531,19 +3530,24 @@ def scenario_country_overlay(
         ("nric",             "STRING COMMENT 'Singapore NRIC'"),
         ("mykad",            "STRING COMMENT 'Malaysian MyKad IC number'"),
     ]
-    for col_name, col_def in apj_columns:
-        try:
-            _sdk_run_sql(
-                auth_file,
-                f"ALTER TABLE {DEV_FIN_CAT}.finance.customers ADD COLUMN {col_name} {col_def}",
-                warehouse_id=resolved_wh,
-            )
-        except Exception as e:
-            # Column may already exist from a previous partial run
-            if "already exists" in str(e).lower() or "COLUMN_ALREADY_EXISTS" in str(e):
-                print(f"  (column {col_name} already exists — skipping)")
-            else:
-                raise
+
+    def _ensure_apj_columns() -> None:
+        """Add APJ columns to finance.customers (idempotent — skips if exists)."""
+        for col_name, col_def in apj_columns:
+            try:
+                _sdk_run_sql(
+                    auth_file,
+                    f"ALTER TABLE {DEV_FIN_CAT}.finance.customers ADD COLUMN {col_name} {col_def}",
+                    warehouse_id=resolved_wh,
+                )
+            except Exception as e:
+                if "already exists" in str(e).lower() or "COLUMN_ALREADY_EXISTS" in str(e):
+                    pass  # expected
+                else:
+                    raise
+
+    _step("Phase 1 — Adding APJ columns to finance.customers")
+    _ensure_apj_columns()
 
     _make("setup", f"ENV={env}")
     _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
