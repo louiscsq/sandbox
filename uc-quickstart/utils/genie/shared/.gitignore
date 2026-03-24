@@ -1,6 +1,7 @@
 # Provisioned test environment state + credentials (contain secrets)
 scripts/account-admin.env
 scripts/account-admin.env.*
+scripts/account-admin.*.env
 scripts/.test_env_state.json
 
 # Python cache
@@ -11,6 +12,7 @@ __pycache__/
 *.tfstate
 *.tfstate.backup
 .terraform/
+*.terraform.lock.hcl
 
 # AI-generated output (user-specific)
 generated/

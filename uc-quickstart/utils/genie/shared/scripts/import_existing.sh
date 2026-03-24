@@ -172,7 +172,6 @@ GEOF
 }
 
 # Only outputs tag keys that EXIST in the Databricks account, to avoid
-# "Cannot import non-existent remote object" noise for freshly-destroyed policies.
 extract_tag_keys() {
   python3 - << 'TKEOF'
 import hcl2, sys, os
@@ -196,62 +195,13 @@ client_id     = _str(auth.get('databricks_client_id',     ''))
 client_secret = _str(auth.get('databricks_client_secret', ''))
 workspace_host = _str(auth.get('databricks_workspace_host', ''))
 
-# Only emit keys that ACTUALLY EXIST in Databricks.
-# If a desired key doesn't exist yet, terraform apply will CREATE it — no
-# import needed.  Emitting non-existent keys causes noisy
-# "Cannot import non-existent remote object" errors that look alarming
-# even though run_import() handles them.  Querying first gives a clean
-# import step with no false errors.
-existing = set()
-try:
-    from databricks.sdk import WorkspaceClient
-    w = WorkspaceClient(
-        host=workspace_host,
-        client_id=client_id,
-        client_secret=client_secret,
-    )
-    # SDK method name varies by version; try both
-    for list_fn_name in ('list_tag_policies', 'list'):
-        try:
-            list_fn = getattr(w.tag_policies, list_fn_name)
-            for tp in list_fn():
-                key = getattr(tp, 'tag_key', None)
-                if key and key in desired:
-                    existing.add(key)
-            break
-        except Exception:
-            continue
-    else:
-        # Fall back to REST API
-        import ssl, urllib.request, json as _json
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        token = w.config.authenticate()
-        base  = workspace_host.rstrip('/')
-        try:
-            req = urllib.request.Request(f'{base}/api/2.1/unity-catalog/tag-policies', headers=token)
-            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
-                data = _json.loads(resp.read())
-            for tp in data.get('tag_policies', []):
-                key = tp.get('tag_key', '')
-                if key and key in desired:
-                    existing.add(key)
-        except Exception as rest_err:
-            sys.stderr.write(f'WARNING: tag policy list failed via SDK and REST ({rest_err}); skipping import\n')
-            sys.exit(0)
-except Exception as e:
-    sys.stderr.write(f'WARNING: could not list tag policies ({e}); skipping import\n')
-    sys.exit(0)
-
-missing = desired - existing
-if missing:
-    sys.stderr.write(f'INFO: tag policies not in Databricks yet (will be created by apply): {sorted(missing)}\n')
-if existing:
-    sys.stderr.write(f'INFO: importing existing tag policies: {sorted(existing)}\n')
-
-# Only emit keys that exist — terraform apply handles the rest
-for k in sorted(existing):
+# Try importing ALL desired keys unconditionally.  terraform import fails
+# harmlessly for non-existent resources (run_import catches the error),
+# but skipping a key that DOES exist causes "already exists" errors on
+# create — which are harder to recover from.  This avoids depending on
+# the list API, which returns stale results after rapid delete/recreate
+# cycles (eventual consistency).
+for k in sorted(desired):
     print(k)
 TKEOF
 }

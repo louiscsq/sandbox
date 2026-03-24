@@ -25,11 +25,11 @@ Required Azure RBAC roles on the resource group:
 
 ## Configuration
 
-### `account-admin.env` (for integration tests)
+### `account-admin.azure.env` (for integration tests)
+
+`make setup` creates this file automatically from the example template. Fill in:
 
 ```env
-CLOUD_PROVIDER = azure
-
 # Databricks
 DATABRICKS_ACCOUNT_ID       =
 DATABRICKS_CLIENT_ID        =

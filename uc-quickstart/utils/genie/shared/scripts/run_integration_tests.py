@@ -116,7 +116,8 @@ if not sys.stdout.line_buffering:
 
 SCRIPT_DIR  = Path(__file__).resolve().parent
 MODULE_ROOT = SCRIPT_DIR.parent          # …/genie/shared/
-CLOUD_ROOT  = Path(os.environ.get("CLOUD_ROOT", MODULE_ROOT.parent / "aws"))
+_default_cloud = os.environ.get("CLOUD_PROVIDER", "aws").lower()
+CLOUD_ROOT  = Path(os.environ.get("CLOUD_ROOT", MODULE_ROOT.parent / _default_cloud))
 
 # ENVS_DIR is set dynamically in main() — either from --envs-dir, from the
 # ENVS_DIR env var (set by the cloud-specific Makefile), from the provisioned
@@ -1929,6 +1930,7 @@ def _create_genie_only_sp(
     workspace_id: str,
     warehouse_id: str,
     display_name: str = "genie-test-sql-user-sp",
+    cfg: dict | None = None,
 ) -> tuple[int, str, str]:
     """Create a minimal-privilege SP for genie_only mode (no admin roles at all).
 
@@ -1947,7 +1949,8 @@ def _create_genie_only_sp(
     from databricks.sdk import AccountClient
     from databricks.sdk.service.iam import WorkspacePermission
 
-    cfg = _load_auth_cfg(auth_file)
+    if cfg is None:
+        cfg = _load_auth_cfg(auth_file)
     _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
 
     account_id    = _s(cfg.get("databricks_account_id", ""))
@@ -2881,10 +2884,8 @@ def scenario_schema_drift(
     _step("Running generate-delta to classify new column")
     _make("generate-delta", f"ENV={env}", retries=2)
 
-    gen_abac = ENVS_DIR / env / "generated" / "abac.auto.tfvars"
-    da_abac = ENVS_DIR / env / "data_access" / "abac.auto.tfvars"
-    delta_target = gen_abac if gen_abac.exists() else da_abac
-    _assert_contains(delta_target, "emergency_ssn", "emergency_ssn added to config")
+    da_abac = ENVS_DIR / env / "generated" / "abac.auto.tfvars"
+    _assert_contains(da_abac, "emergency_ssn", "emergency_ssn added to config")
 
     _step("Applying delta changes")
     _clear_apply_fingerprints(ENVS_DIR / env / "data_access")
@@ -2942,7 +2943,7 @@ def scenario_schema_drift(
     _step("Running generate-delta to remove stale assignment")
     _make("generate-delta", f"ENV={env}", retries=1)
 
-    text = delta_target.read_text()
+    text = da_abac.read_text()
     if "emergency_ssn" in text:
         raise RuntimeError("emergency_ssn should have been removed from config after DROP COLUMN")
     print(f"  {_green('PASS')}  Stale assignment removed")
@@ -2984,7 +2985,7 @@ def scenario_schema_drift(
     _step("Running generate-delta to handle rename")
     _make("generate-delta", f"ENV={env}", retries=2)
 
-    text = delta_target.read_text()
+    text = da_abac.read_text()
     if "contact_email" not in text:
         raise RuntimeError("contact_email should appear in config after rename delta")
     print(f"  {_green('PASS')}  Renamed column classified")
@@ -3092,7 +3093,17 @@ def scenario_genie_only(
     _ensure_packages()
 
     # ── Phase 1: Data setup (uses full-privilege SP) ────────────────────────
+    # Cache auth file content BEFORE preamble cleanup.  On Azure with a
+    # provisioned test env, the cleanup's make destroy → _bootstrap →
+    # _prepare-env cycle can remove dev/auth.auto.tfvars (the Makefile
+    # operates on CLOUD_ROOT/envs/ while the test uses envs/test/).
+    # Restore the file after cleanup so setup_test_data.py can read it.
+    _auth_content = auth_file.read_text() if auth_file.exists() else None
+    cfg = _load_auth_cfg(auth_file)
     _preamble_cleanup(env, fresh_env=fresh_env)
+    if _auth_content and not auth_file.exists():
+        auth_file.parent.mkdir(parents=True, exist_ok=True)
+        auth_file.write_text(_auth_content)
 
     _step("Phase 1 — Creating dev_fin test catalog")
     _setup_data(auth_file, warehouse_id=warehouse_id)
@@ -3102,14 +3113,13 @@ def scenario_genie_only(
 
     # ── Phase 2: Create reduced-privilege SP + configure genie_only ─────────
     _step("Phase 2 — Creating minimal-privilege SP (workspace USER + SQL entitlement)")
-    cfg = _load_auth_cfg(auth_file)
     _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
     ws_id = _s(cfg.get("databricks_workspace_id", ""))
     account_id = _s(cfg.get("databricks_account_id", ""))
     ws_host = _s(cfg.get("databricks_workspace_host", ""))
 
     ws_admin_sp_id, ws_admin_client_id, ws_admin_client_secret = (
-        _create_genie_only_sp(auth_file, ws_id, warehouse_id=resolved_wh)
+        _create_genie_only_sp(auth_file, ws_id, warehouse_id=resolved_wh, cfg=cfg)
     )
 
     _step("Phase 2 — Writing env.auto.tfvars with genie_only = true")
@@ -3231,14 +3241,6 @@ SCENARIOS: dict[str, tuple[str, Callable]] = {
     "self-service-genie":   ("Central governance + BU teams self-serve Genie (MODE=governance/genie)", scenario_self_service_genie),
     "abac-only":            ("ABAC governance only (no Genie Space) + upgrade to Genie",         scenario_abac_only),
     "multi-space-import":   ("Import two UI-created Genie Spaces in one make generate",          scenario_multi_space_import),
-    "quickstart":      ("Single space, single catalog (Finance/dev_fin)",                    scenario_quickstart),
-    "multi-catalog":   ("One space spanning two catalogs (Combined)",                        scenario_multi_catalog),
-    "multi-space":     ("Two spaces, separate catalogs (Finance+Clinical)",                  scenario_multi_space),
-    "per-space":       ("Incremental per-space generation (isolation test)",                 scenario_per_space),
-    "promote":         ("Multi-space dev → prod promotion",                                  scenario_promote),
-    "multi-env":       ("Two independent envs (dev Finance, bu2 Clinical)",                  scenario_multi_env),
-    "attach-promote":  ("Attach to UI-created space (API discovery) + promote",              scenario_attach_and_promote),
-    "self-service-genie": ("Central governance + BU teams self-serve Genie (MODE=governance/genie)", scenario_self_service_genie),
     "schema-drift":    ("Column tag drift detection after ADD/DROP/RENAME COLUMN",           scenario_schema_drift),
     "genie-only":      ("Genie-only mode (genie_only=true, no account-level resources)",    scenario_genie_only),
 }
@@ -3493,7 +3495,7 @@ def main() -> None:
 
     if not auth_file.exists():
         print(f"ERROR: auth file not found: {auth_file}")
-        print("  Run from the genie/aws/ directory, or pass --auth-file <path>.")
+        print("  Run from your cloud wrapper directory (genie/aws/ or genie/azure/), or pass --auth-file <path>.")
         sys.exit(1)
 
     # Optional one-time nuclear cleanup of ALL FGAC policies across all catalogs.

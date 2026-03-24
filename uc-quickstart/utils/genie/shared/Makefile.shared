@@ -142,6 +142,10 @@ _guard-workspace-config:
 	fi
 
 setup: _bootstrap ## Prepare the selected environment(s) and show next steps
+	@if [ ! -f "$(ACCOUNT_ADMIN_ENV)" ]; then \
+		cp "$(_CRED_EXAMPLE)" "$(ACCOUNT_ADMIN_ENV)"; \
+		echo "Created $(ACCOUNT_ADMIN_ENV) — fill in your credentials before running make test-ci."; \
+	fi
 	@echo "=== Setup ($(ENV)) ==="
 	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		echo "Shared account environment ready:     $(ACCOUNT_ENV_DIR)"; \
@@ -477,7 +481,10 @@ _ITEST_KD_FLAG  := $(if $(KEEP_DATA),--keep-data,)
 _ITEST_FF_FLAG  := $(if $(filter 0,$(FAIL_FAST)),,--fail-fast)
 # Path to account-admin credentials file used by test-ci for automated provisioning.
 # Override with: make test-ci ACCOUNT_ADMIN_ENV=/path/to/credentials.env
-ACCOUNT_ADMIN_ENV ?= $(SHARED_ROOT)/scripts/account-admin.env
+# Requires a cloud-specific credentials file (e.g. account-admin.aws.env or account-admin.azure.env).
+# `make setup` copies the matching .env.example automatically on first run.
+ACCOUNT_ADMIN_ENV  ?= $(SHARED_ROOT)/scripts/account-admin.$(CLOUD).env
+_CRED_EXAMPLE      := $(SHARED_ROOT)/scripts/account-admin.$(CLOUD).env.example
 _PROVISION       := python3 "$(SHARED_ROOT)/scripts/provision_test_env.py"
 
 test-unit: ## Run fast unit tests (no Databricks/LLM/Terraform required) — use before integration tests
@@ -566,7 +573,7 @@ test-ci: ## Full CI pipeline: unit tests → provision fresh env → integration
 	@# exits quickly on a broken codebase (saves cloud time and cost).
 	@#
 	@# Options:
-	@#   ACCOUNT_ADMIN_ENV=<path>   credentials file (default: scripts/account-admin.env)
+	@#   ACCOUNT_ADMIN_ENV=<path>   credentials file (default: scripts/account-admin.<cloud>.env)
 	@#   WAREHOUSE_ID=<id>          pin a specific SQL warehouse (optional)
 	@#   SCENARIO=<name>            run only one scenario instead of all (optional)
 	@#   FAIL_FAST=0                disable fail-fast to see all scenario results
@@ -588,7 +595,7 @@ test-ci: ## Full CI pipeline: unit tests → provision fresh env → integration
 	}; \
 	echo ""; \
 	echo "── Phase 2: Provision fresh integration-test environment"; \
-	$(_PROVISION) provision --force --env-file "$(ACCOUNT_ADMIN_ENV)"; \
+	CLOUD_PROVIDER=$(CLOUD) $(_PROVISION) provision --force --env-file "$(ACCOUNT_ADMIN_ENV)"; \
 	PROVISION_EXIT=$$?; \
 	if [ "$$PROVISION_EXIT" -ne 0 ]; then \
 		echo ""; \
@@ -605,7 +612,7 @@ test-ci: ## Full CI pipeline: unit tests → provision fresh env → integration
 	TEST_EXIT=$$?; \
 	echo ""; \
 	echo "── Phase 4: Teardown (always runs)"; \
-	$(_PROVISION) teardown --env-file "$(ACCOUNT_ADMIN_ENV)"; \
+	CLOUD_PROVIDER=$(CLOUD) $(_PROVISION) teardown --env-file "$(ACCOUNT_ADMIN_ENV)"; \
 	TEARDOWN_EXIT=$$?; \
 	echo ""; \
 	if [ "$$TEST_EXIT" -ne 0 ]; then \

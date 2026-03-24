@@ -3,17 +3,12 @@ from __future__ import annotations
 
 import sys
 import time
+from typing import Any
+
 from .base import CloudProvider, StorageResult, CredentialResult
 
 # ANSI helpers
-def _green(s): return f"\033[32m{s}\033[0m"
-def _red(s): return f"\033[31m{s}\033[0m"
-def _cyan(s): return f"\033[36m{s}\033[0m"
-def _yellow(s): return f"\033[33m{s}\033[0m"
-def _step(msg): print(f"\n{_cyan('──')} {msg}")
-def _ok(msg): print(f"  {_green('✓')}  {msg}")
-def _warn(msg): print(f"  {_yellow('⚠')}  {msg}", file=sys.stderr)
-def _err(msg): print(f"  {_red('✗')}  {msg}", file=sys.stderr)
+from ._ansi import _green, _red, _cyan, _yellow, _step, _ok, _warn, _err
 
 
 def _ensure_azure_deps():
@@ -43,17 +38,17 @@ class AzureProvider(CloudProvider):
     def account_host(self) -> str:
         return "https://accounts.azuredatabricks.net"
 
-    def validate_config(self, cfg):
+    def validate_config(self, cfg: dict[str, str]) -> None:
         required = ["AZURE_SUBSCRIPTION_ID", "AZURE_RESOURCE_GROUP", "AZURE_REGION"]
         missing = [k for k in required if not cfg.get(k)]
         if missing:
             _err(f"Missing Azure config: {', '.join(missing)}")
             sys.exit(1)
 
-    def get_region(self, cfg):
+    def get_region(self, cfg: dict[str, str]) -> str:
         return cfg["AZURE_REGION"]
 
-    def setup_storage(self, cfg, run_id, region, account_id):
+    def setup_storage(self, cfg: dict[str, str], run_id: str, region: str, account_id: str) -> StorageResult:
         _ensure_azure_deps()
         from azure.identity import ClientSecretCredential
         from azure.mgmt.storage import StorageManagementClient
@@ -175,7 +170,7 @@ class AzureProvider(CloudProvider):
             resource_group=resource_group,
         )
 
-    def register_storage_credential(self, account_client, metastore_id, storage_result):
+    def register_storage_credential(self, account_client: Any, metastore_id: str, storage_result: StorageResult) -> CredentialResult:
         from databricks.sdk.service.catalog import (
             CreateAccountsStorageCredential,
             AzureManagedIdentityRequest,
@@ -200,11 +195,11 @@ class AzureProvider(CloudProvider):
             _warn(f"Could not register storage credential: {exc}")
             return CredentialResult()
 
-    def post_credential_setup(self, cfg, storage_result, credential_result, account_id, region):
+    def post_credential_setup(self, cfg: dict[str, str], storage_result: StorageResult, credential_result: CredentialResult, account_id: str, region: str) -> None:
         # Azure doesn't need post-registration trust policy tightening
         pass
 
-    def teardown_storage(self, cfg, state):
+    def teardown_storage(self, cfg: dict[str, str], state: dict) -> None:
         _ensure_azure_deps()
         from azure.identity import ClientSecretCredential, DefaultAzureCredential
 
@@ -245,13 +240,13 @@ class AzureProvider(CloudProvider):
             except Exception as exc:
                 _warn(f"Could not delete Storage Account: {exc}")
 
-    def workspace_create_kwargs(self, region):
+    def workspace_create_kwargs(self, region: str) -> dict:
         return {"location": region}
 
     # ARM preview API version that supports computeMode=Serverless
     _ARM_API_VERSION = "2025-10-01-preview"
 
-    def _azure_credential(self, cfg):
+    def _azure_credential(self, cfg: dict[str, str]):
         """Return an Azure credential from config (SP preferred, else DefaultAzureCredential)."""
         _ensure_azure_deps()
         from azure.identity import ClientSecretCredential, DefaultAzureCredential
@@ -263,12 +258,12 @@ class AzureProvider(CloudProvider):
             )
         return DefaultAzureCredential()
 
-    def _arm_token(self, cfg):
+    def _arm_token(self, cfg: dict[str, str]) -> str:
         """Get an Azure management bearer token."""
         cred = self._azure_credential(cfg)
         return cred.get_token("https://management.azure.com/.default").token
 
-    def create_workspace(self, cfg, ws_name, region, account_client):
+    def create_workspace(self, cfg: dict[str, str], ws_name: str, region: str, account_client: Any) -> tuple[int, str]:
         """Create a serverless Azure Databricks workspace via ARM REST API.
 
         Uses the preview API to set computeMode=Serverless, which skips the
@@ -332,7 +327,7 @@ class AzureProvider(CloudProvider):
 
         raise TimeoutError("Workspace did not reach Succeeded within 10 minutes")
 
-    def teardown_workspace(self, cfg, state):
+    def teardown_workspace(self, cfg: dict[str, str], state: dict) -> None:
         """Delete an Azure Databricks workspace via ARM REST API."""
         ws_name = state.get("workspace_name")
         if not ws_name:
@@ -379,7 +374,7 @@ class AzureProvider(CloudProvider):
         except Exception as exc:
             _warn(f"Could not delete workspace via ARM: {exc}")
 
-    def state_extras(self, storage_result):
+    def state_extras(self, storage_result: StorageResult) -> dict:
         return {
             "azure_storage_account_name": storage_result.storage_account_name,
             "azure_container_name": storage_result.container_name,
@@ -391,5 +386,5 @@ class AzureProvider(CloudProvider):
             ),
         }
 
-    def storage_url_for_ext_location(self, storage_result, run_id):
+    def storage_url_for_ext_location(self, storage_result: StorageResult, run_id: str) -> str:
         return storage_result.storage_url

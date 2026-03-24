@@ -9,18 +9,10 @@ from typing import Any
 from .base import CloudProvider, StorageResult, CredentialResult
 
 # ---------------------------------------------------------------------------
-# ANSI helpers (duplicated from provision_test_env.py to keep this module
-# self-contained — the parent script is not a package we can import from).
+# ANSI helpers
 # ---------------------------------------------------------------------------
 
-def _green(s): return f"\033[32m{s}\033[0m"
-def _red(s):   return f"\033[31m{s}\033[0m"
-def _cyan(s):  return f"\033[36m{s}\033[0m"
-def _yellow(s): return f"\033[33m{s}\033[0m"
-def _step(msg): print(f"\n{_cyan('──')} {msg}")
-def _ok(msg):   print(f"  {_green('✓')}  {msg}")
-def _warn(msg): print(f"  {_yellow('⚠')}  {msg}", file=sys.stderr)
-def _err(msg):  print(f"  {_red('✗')}  {msg}", file=sys.stderr)
+from ._ansi import _green, _red, _cyan, _yellow, _step, _ok, _warn, _err
 
 # ---------------------------------------------------------------------------
 # AWS / IAM helpers  (extracted from provision_test_env.py)

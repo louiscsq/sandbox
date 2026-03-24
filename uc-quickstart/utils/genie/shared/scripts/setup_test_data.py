@@ -18,7 +18,7 @@ This supports testing:
                            make generate SPACE="Clinical Analytics"
 
 Usage:
-  # From the genie/aws/ root (where auth.auto.tfvars lives):
+  # From your cloud wrapper directory (genie/aws/ or genie/azure/):
   python scripts/setup_test_data.py                   # dev catalogs only
   python scripts/setup_test_data.py --prod            # dev + prod catalogs
 
@@ -570,7 +570,7 @@ def _load_auth(auth_file: Path) -> dict:
 
     if not auth_file.exists():
         print(f"ERROR: auth file not found: {auth_file}")
-        print("  Run from the genie/aws/ directory, or pass --auth-file <path>.")
+        print("  Run from your cloud wrapper directory (genie/aws/ or genie/azure/), or pass --auth-file <path>.")
         sys.exit(1)
 
     with open(auth_file) as f:
@@ -626,6 +626,7 @@ def _get_warehouse(w, warehouse_id: str) -> str:
         name="ABAC Test Setup Warehouse",
         cluster_size="Small",
         warehouse_type=EndpointInfoWarehouseType.PRO,
+        max_num_clusters=1,
         enable_serverless_compute=True,
         auto_stop_mins=10,
     ).result()

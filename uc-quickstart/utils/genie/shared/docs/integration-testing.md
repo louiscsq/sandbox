@@ -123,12 +123,17 @@ writes all `auth.auto.tfvars` files so the test runner uses that environment.
 
 ### One-time setup
 
+Run `make setup` from the `aws/` or `azure/` directory — it automatically copies the matching example file to `scripts/account-admin.<cloud>.env` if it does not yet exist. Then fill in your credentials:
+
 ```bash
-# Copy the example credentials file
-cp scripts/account-admin.env.example scripts/account-admin.env
+# AWS
+vi scripts/account-admin.aws.env
+
+# Azure
+vi scripts/account-admin.azure.env
 ```
 
-Fill in `scripts/account-admin.env`. The file has three sections — shared Databricks credentials, a cloud provider selector, and cloud-specific credentials. Fill in sections 1 and 2, then only the section that matches your cloud provider.
+The file has two sections — shared Databricks credentials and cloud-specific credentials.
 
 #### Section 1 — Databricks credentials (both clouds)
 
@@ -142,13 +147,7 @@ Fill in `scripts/account-admin.env`. The file has three sections — shared Data
 > - AWS: `https://accounts.cloud.databricks.com`
 > - Azure: `https://accounts.azuredatabricks.net`
 
-#### Section 2 — Cloud provider
-
-Set `CLOUD_PROVIDER` to `aws` or `azure`, then fill in **only** the matching section below.
-
----
-
-#### Section 3a — AWS credentials (skip if `CLOUD_PROVIDER=azure`)
+#### Section 2 — AWS credentials (`account-admin.aws.env` only)
 
 | Key | Where to find it |
 |---|---|
@@ -199,7 +198,7 @@ aws s3 rm s3://<your-bucket>/ --recursive --exclude "*" --include "genie-test-*"
 
 ---
 
-#### Section 3b — Azure credentials (skip if `CLOUD_PROVIDER=aws`)
+#### Section 2 — Azure credentials (`account-admin.azure.env` only)
 
 | Key | Where to find it |
 |---|---|
@@ -301,7 +300,7 @@ This deletes cloud-specific resources, the workspace, metastore (and all catalog
 > python scripts/provision_test_env.py teardown
 > ```
 >
-> *Azure — "ClientSecretExpired" or "InvalidAuthenticationToken":* Your Azure client secret has expired. Generate a new secret in the Azure Portal (Microsoft Entra ID → App registrations → Certificates & secrets), update `account-admin.env`, and re-run teardown.
+> *Azure — "ClientSecretExpired" or "InvalidAuthenticationToken":* Your Azure client secret has expired. Generate a new secret in the Azure Portal (Microsoft Entra ID → App registrations → Certificates & secrets), update `account-admin.azure.env`, and re-run teardown.
 >
 > The Databricks workspace and metastore are always deleted by teardown regardless of whether
 > the cloud resource cleanup succeeds.
@@ -310,7 +309,7 @@ This deletes cloud-specific resources, the workspace, metastore (and all catalog
 
 | Flag | Description |
 |---|---|
-| `--env-file PATH` | Path to credentials file (default: `scripts/account-admin.env`) |
+| `--env-file PATH` | Path to credentials file (default: `scripts/account-admin.<cloud>.env`) |
 | `--dry-run` | Print what would happen without creating/deleting anything |
 | `--force` | With `provision`: overwrite an existing provisioned environment |
 
@@ -884,7 +883,7 @@ test suite takes ~90 minutes; if the STS token lifetime is shorter than the tota
 
 **Fix (preferred) — switch to long-lived IAM user keys:**
 
-Remove `AWS_SESSION_TOKEN` from `scripts/account-admin.env` and replace `AWS_ACCESS_KEY_ID` /
+Remove `AWS_SESSION_TOKEN` from `scripts/account-admin.aws.env` and replace `AWS_ACCESS_KEY_ID` /
 `AWS_SECRET_ACCESS_KEY` with permanent IAM user credentials. Long-lived keys never expire and
 work reliably across the full CI pipeline.
 
@@ -935,7 +934,7 @@ aws sts assume-role --role-arn arn:aws:iam::<account>:role/<role> \
 
 1. Azure Portal → Microsoft Entra ID → App registrations → your app → Certificates & secrets
 2. Generate a new client secret
-3. Update `AZURE_CLIENT_SECRET` in `scripts/account-admin.env`
+3. Update `AZURE_CLIENT_SECRET` in `scripts/account-admin.azure.env`
 4. Re-run teardown:
    ```bash
    python scripts/provision_test_env.py teardown

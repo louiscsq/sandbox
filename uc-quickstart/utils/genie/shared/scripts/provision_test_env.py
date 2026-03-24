@@ -10,10 +10,8 @@ run a brand-new metastore (counter always starts at 0).  After the run, call
 
 Usage
 -----
-  # One-time: copy the example and fill in your account-admin SP credentials
-  cp scripts/account-admin.env.example scripts/account-admin.env
-
-  # Provision a fresh environment (≈10-15 min for workspace creation)
+  # One-time: `make setup` creates scripts/account-admin.<cloud>.env automatically.
+  # Fill in your account-admin SP credentials, then provision:
   python scripts/provision_test_env.py provision
 
   # Check what is currently provisioned
@@ -25,8 +23,8 @@ Usage
   # Tear down everything when done
   python scripts/provision_test_env.py teardown
 
-Environment file (scripts/account-admin.env)
---------------------------------------------
+Environment file (scripts/account-admin.<cloud>.env)
+-----------------------------------------------------
   DATABRICKS_ACCOUNT_ID       = <your Databricks account UUID>
   DATABRICKS_CLIENT_ID        = <SP application/client ID — must have Account Admin>
   DATABRICKS_CLIENT_SECRET    = <SP OAuth secret>
@@ -94,11 +92,18 @@ from pathlib import Path
 
 SCRIPT_DIR  = Path(__file__).resolve().parent
 MODULE_ROOT = SCRIPT_DIR.parent                          # …/genie/shared/
-CLOUD_ROOT  = Path(os.environ.get("CLOUD_ROOT", MODULE_ROOT.parent / "aws"))
+# Infer cloud from CLOUD_ROOT path name (set by Makefile), fall back to CLOUD_PROVIDER env var.
+_cloud_root_env = Path(os.environ.get("CLOUD_ROOT", ""))
+_default_cloud  = (
+    _cloud_root_env.name
+    if _cloud_root_env.name in ("aws", "azure")
+    else os.environ.get("CLOUD_PROVIDER", "aws").lower()
+)
+CLOUD_ROOT  = Path(os.environ.get("CLOUD_ROOT", MODULE_ROOT.parent / _default_cloud))
 ENVS_DIR    = CLOUD_ROOT / "envs"                       # user's real envs (never touched)
 TEST_ENVS_DIR = CLOUD_ROOT / "envs" / "test"            # isolated dir for integration tests
 STATE_FILE  = SCRIPT_DIR / ".test_env_state.json"
-DEFAULT_ENV_FILE = SCRIPT_DIR / "account-admin.env"
+DEFAULT_ENV_FILE = SCRIPT_DIR / f"account-admin.{_default_cloud}.env"
 
 
 def _display_path(p: Path) -> Path:
@@ -115,11 +120,9 @@ def _display_path(p: Path) -> Path:
 # ANSI helpers
 # ---------------------------------------------------------------------------
 
-def _green(s: str) -> str:  return f"\033[32m{s}\033[0m"
-def _red(s: str)   -> str:  return f"\033[31m{s}\033[0m"
-def _cyan(s: str)  -> str:  return f"\033[36m{s}\033[0m"
+from cloud_providers._ansi import _green, _red, _cyan, _yellow, _step, _ok, _warn, _err
+
 def _bold(s: str)  -> str:  return f"\033[1m{s}\033[0m"
-def _yellow(s: str)-> str:  return f"\033[33m{s}\033[0m"
 
 def _banner(title: str) -> None:
     width = 66
@@ -127,18 +130,6 @@ def _banner(title: str) -> None:
     print("=" * width)
     print(f"  {title}")
     print("=" * width)
-
-def _step(msg: str) -> None:
-    print(f"\n{_cyan('──')} {msg}")
-
-def _ok(msg: str) -> None:
-    print(f"  {_green('✓')}  {msg}")
-
-def _warn(msg: str) -> None:
-    print(f"  {_yellow('⚠')}  {msg}", file=sys.stderr)
-
-def _err(msg: str) -> None:
-    print(f"  {_red('✗')}  {msg}", file=sys.stderr)
 
 # ---------------------------------------------------------------------------
 # AWS / IAM helpers  (boto3-based, installed on demand)
@@ -614,7 +605,7 @@ def _validate_config(cfg: dict[str, str]) -> None:
 
 def _get_cloud_provider(cfg: dict) -> "CloudProvider":
     """Return the appropriate cloud provider based on config."""
-    cloud = cfg.get("CLOUD_PROVIDER", "aws").lower()
+    cloud = cfg.get("CLOUD_PROVIDER", _default_cloud).lower()
     if cloud == "aws":
         from cloud_providers.aws_provider import AWSProvider
         return AWSProvider()
@@ -858,7 +849,7 @@ databricks_workspace_host = "{workspace_host}"
 # Provision
 # ---------------------------------------------------------------------------
 
-def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = False) -> None:
+def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = False, env_file: Path | None = None) -> None:
     _banner("Provision Fresh Integration-Test Environment")
 
     account_id    = cfg["DATABRICKS_ACCOUNT_ID"]
@@ -877,7 +868,7 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
             _warn("Existing environment found — tearing it down before re-provisioning (--force).")
             _warn(f"  Workspace:  {existing.get('workspace_name')} ({existing.get('workspace_id')})")
             _warn(f"  Metastore:  {existing.get('metastore_name')} ({existing.get('metastore_id')})")
-            cmd_teardown(cfg)
+            cmd_teardown(env_file=env_file)
         else:
             _warn("A provisioned environment already exists (found .test_env_state.json).")
             _warn(f"  Workspace:  {existing.get('workspace_name')} ({existing.get('workspace_id')})")
@@ -893,7 +884,7 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     print(f"  Workspace       : {ws_name}")
     print(f"  Metastore       : {ms_name}")
     print(f"  Region          : {region}")
-    print(f"  Cloud provider  : {cfg.get('CLOUD_PROVIDER', 'aws')}")
+    print(f"  Cloud provider  : {cfg.get('CLOUD_PROVIDER', _default_cloud)}")
     print(f"  SP (admin)      : {client_id}")
 
     if dry_run:
@@ -999,7 +990,7 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     # that a crash mid-way still leaves enough info for teardown.
     state: dict = {
         "run_id":          run_id,
-        "cloud_provider":  cfg.get("CLOUD_PROVIDER", "aws").lower(),
+        "cloud_provider":  cfg.get("CLOUD_PROVIDER", _default_cloud).lower(),
         "workspace_name":  ws_name,
         "workspace_id":    None,
         "workspace_host":  None,
@@ -1245,7 +1236,7 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
 # Teardown
 # ---------------------------------------------------------------------------
 
-def cmd_teardown(dry_run: bool = False) -> None:
+def cmd_teardown(dry_run: bool = False, env_file: Path | None = None) -> None:
     _banner("Tear Down Integration-Test Environment")
 
     state = _load_state()
@@ -1274,7 +1265,7 @@ def cmd_teardown(dry_run: bool = False) -> None:
     # credentials in the shell (e.g. a renewed AWS_SESSION_TOKEN) take
     # priority over stale values stored in the file.  This matters for
     # long test runs where temporary STS tokens can expire before teardown.
-    env_file = DEFAULT_ENV_FILE
+    env_file = env_file or DEFAULT_ENV_FILE
     env_cfg  = _load_config(env_file)
     client_secret = (
         os.environ.get("DATABRICKS_CLIENT_SECRET")
@@ -1365,7 +1356,7 @@ def cmd_teardown(dry_run: bool = False) -> None:
     if test_envs.exists():
         import shutil as _shutil
         _shutil.rmtree(test_envs)
-        _ok(f"Removed {test_envs.relative_to(CLOUD_ROOT)}")
+        _ok(f"Removed {_display_path(test_envs)}")
 
     # ------------------------------------------------------------------
     # Step 6: Clear state
@@ -1454,13 +1445,14 @@ def main() -> None:
         return
 
     if args.command == "teardown":
-        cmd_teardown(dry_run=args.dry_run)
+        cmd_teardown(dry_run=args.dry_run, env_file=Path(args.env_file))
         return
 
     # provision
-    cfg = _load_config(Path(args.env_file))
+    env_file = Path(args.env_file)
+    cfg = _load_config(env_file)
     _validate_config(cfg)
-    cmd_provision(cfg, dry_run=args.dry_run, force=args.force)
+    cmd_provision(cfg, dry_run=args.dry_run, force=args.force, env_file=env_file)
 
 
 if __name__ == "__main__":

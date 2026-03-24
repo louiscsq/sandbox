@@ -1,13 +1,36 @@
 # GenieRails — Azure
 
-Put Genie onboarding on rails — with built-in guardrails. GenieRails generates ABAC governance, masking functions, and Genie Spaces from a small set of input files so you can get business users into Genie quickly without editing Terraform.
+> **On AWS?** Go to [`../aws/README.md`](../aws/README.md) instead.
+
+GenieRails gets business users into Genie quickly. You provide a list of Unity Catalog tables and a Genie Space name. GenieRails:
+
+1. Reads your table schemas and uses AI to generate ABAC groups, row-level security policies, and data masking functions tailored to your data
+2. Lets you review and adjust everything before anything is deployed
+3. Deploys all components to your Azure Databricks workspace with a single `make apply`
+
+You never write Terraform. You never manually configure Unity Catalog grants or Genie Space permissions.
+
+## What Gets Deployed
+
+After `make apply`, your workspace will have:
+
+| Component | What it is |
+| --------- | ---------- |
+| **Account groups** | Unity Catalog groups scoped to your Genie Space (e.g. `sales-analyst`, `sales-manager`) |
+| **UC grants** | `USE CATALOG`, `USE SCHEMA`, `SELECT` grants on the tables you listed |
+| **Tag policies** | Column-level sensitivity tags (PII, confidential, etc.) |
+| **FGAC policies** | Row-level access policies so each group sees only the rows it's allowed to |
+| **Masking functions** | SQL UDFs that mask or redact sensitive columns for lower-privilege groups |
+| **SQL warehouse** | A serverless SQL warehouse for Genie to run queries (auto-created unless you point to an existing one) |
+| **Genie Space** | The Genie Space itself, configured with your tables and group permissions |
 
 ## Prerequisites
 
-- Tables must already exist in Unity Catalog before running `make generate`
+- Your tables must already exist in Unity Catalog before running `make generate`
 - An Azure Databricks workspace with Unity Catalog enabled
-- A Databricks service principal with these roles:
+- A Databricks service principal with the roles below
 
+### Which service principal roles do I need?
 
 | Mode | Role | Why it's needed |
 | ---- | ---- | --------------- |
@@ -16,23 +39,27 @@ Put Genie onboarding on rails — with built-in guardrails. GenieRails generates
 | Full (default) | **Metastore Admin** | Create tag policies, FGAC policies, grants, and masking functions |
 | Genie-only | **Workspace USER** + **Databricks SQL access** entitlement | Create Genie Spaces only — set `genie_only = true` and provide `sql_warehouse_id` in `env.auto.tfvars`. Also requires `CAN USE` on the warehouse and UC table access (`USE CATALOG`, `USE SCHEMA`, `SELECT`) granted by the governance team. No admin roles needed. |
 
+**Not sure which mode to use?**
+
+- **Full mode** is the default and handles everything end-to-end: GenieRails creates the UC groups, sets up row-level security and masking policies, and builds the Genie Space. Use this if you are starting from scratch or your governance team is comfortable giving the service principal admin roles.
+- **Genie-only mode** is for teams where UC governance (groups, grants, policies) is already managed separately — for example, by a central platform team. GenieRails only creates and configures the Genie Space. The service principal needs no admin roles, but UC access must be pre-granted by whoever manages your governance layer. Enable it with `genie_only = true` in `env.auto.tfvars`.
+
 For Azure-specific resource setup (Azure AD App Registration, RBAC roles, storage accounts), see [Azure Prerequisites](docs/azure-prerequisites.md).
 
 ## Quickstart
 
-```bash
-make setup
-vi envs/dev/auth.auto.tfvars      # service principal credentials
-vi envs/dev/env.auto.tfvars       # your tables and Genie Space name
+### Step 1 — Set up your environment
 
-make generate
-vi envs/dev/generated/abac.auto.tfvars       # review AI-generated groups, policies, Genie config
-vi envs/dev/generated/masking_functions.sql  # review AI-generated masking and row-filter functions
-make validate-generated
-make apply
+```bash
+cd azure/     # always run from here, never from shared/
+make setup
 ```
 
-### `auth.auto.tfvars` — Azure format
+This creates `envs/dev/` with two template files for you to fill in.
+
+### Step 2 — Fill in credentials
+
+Edit `envs/dev/auth.auto.tfvars`:
 
 ```hcl
 databricks_account_id     = "your-account-id"
@@ -43,11 +70,13 @@ databricks_workspace_id   = "your-workspace-id"
 databricks_workspace_host = "https://adb-1234567890.12.azuredatabricks.net"
 ```
 
-Note: Two URLs differ from AWS and must be set explicitly:
-- `databricks_account_host` — required for Azure (`accounts.azuredatabricks.net`); the Terraform default is the AWS URL
-- `databricks_workspace_host` — Azure uses `adb-<workspace-id>.<region-id>.azuredatabricks.net`
+> **Azure-specific URLs:** Both URLs differ from AWS and must be set explicitly.
+> - `databricks_account_host` must be `accounts.azuredatabricks.net` (the Terraform provider default is the AWS URL)
+> - `databricks_workspace_host` uses the Azure format: `adb-<workspace-id>.<region-id>.azuredatabricks.net`
 
-### `env.auto.tfvars` — minimal example
+### Step 3 — Declare your tables
+
+Edit `envs/dev/env.auto.tfvars` and list the Unity Catalog tables to include in the Genie Space:
 
 ```hcl
 genie_spaces = [
@@ -56,19 +85,39 @@ genie_spaces = [
     uc_tables = [
       "dev_catalog.sales.orders",
       "dev_catalog.sales.customers",
-      "dev_catalog.finance.*",   # wildcard expands all tables in the schema
+      "dev_catalog.finance.*",   # wildcard — includes all tables in the schema
     ]
   },
 ]
 ```
 
-All table names must be fully qualified (`catalog.schema.table` or `catalog.schema.*`). The `name` becomes the Genie Space title in the UI. A serverless SQL warehouse is created automatically — see [Playbook](../shared/docs/playbook.md) for warehouse and multi-space options.
+All table names must be fully qualified (`catalog.schema.table` or `catalog.schema.*`). The `name` becomes the Genie Space title in the UI. A serverless SQL warehouse is created automatically — see the [Playbook](../shared/docs/playbook.md) for warehouse and multi-space options.
 
-### What `make apply` does
+### Step 4 — Generate
 
-1. Applies account-level groups and optional group membership
-2. Applies UC grants, tag policies, FGAC policies, and masking functions
-3. Creates the Genie Space, configures it, and sets group permissions
+```bash
+make generate
+```
+
+GenieRails inspects your table schemas and uses AI to produce two files:
+
+- `envs/dev/generated/abac.auto.tfvars` — groups, row-filter policies, Genie Space configuration
+- `envs/dev/generated/masking_functions.sql` — SQL UDFs for column masking
+
+**Review both files before continuing.** This is your chance to adjust group names, tweak row-filter conditions, or remove masking rules you don't need.
+
+### Step 5 — Validate and apply
+
+```bash
+make validate-generated   # checks for schema drift and config errors
+make apply                # deploys everything to your workspace
+```
+
+`make apply` runs in three phases:
+
+1. Account-level groups and optional group membership
+2. UC grants, tag policies, FGAC policies, and masking functions
+3. Genie Space creation, configuration, and group permissions
 
 ## Next Steps
 
@@ -87,6 +136,21 @@ make setup ENV=bu2 && vi envs/bu2/auth.auto.tfvars && vi envs/bu2/env.auto.tfvar
 make generate ENV=bu2 && make apply ENV=bu2
 ```
 
+## How It Works (Architecture)
+
+GenieRails uses a shared module architecture. All Terraform modules, scripts, and Python tools live in `../shared/`. This `azure/` directory is a thin wrapper — you never edit anything in `shared/` directly.
+
+```
+genie/
+├── azure/          ← you work here
+│   ├── Makefile    sets CLOUD=azure, delegates everything to shared/Makefile.shared
+│   ├── envs/       your per-environment configs (auth, tables, generated artifacts)
+│   └── docs/       Azure-specific prerequisites
+└── shared/         all logic lives here — never run commands directly from here
+```
+
+For AWS, see [`../aws/README.md`](../aws/README.md).
+
 ## Testing
 
 ```bash
@@ -97,21 +161,12 @@ make test-ci     # full CI pipeline: provision → integration tests → teardow
 For integration tests, configure Azure credentials:
 
 ```bash
-cp ../shared/scripts/account-admin.env.example ../shared/scripts/account-admin.env
-# Edit: set CLOUD_PROVIDER=azure and fill in Azure + Databricks credentials
+# make setup creates ../shared/scripts/account-admin.azure.env automatically.
+# Fill in your Databricks and Azure credentials before running test-ci.
+vi ../shared/scripts/account-admin.azure.env
 ```
 
 See [Integration Testing](../shared/docs/integration-testing.md) for setup, credentials, scenarios, and troubleshooting.
-
-## Multi-Cloud Architecture
-
-GenieRails uses a shared module architecture. All Terraform modules, scripts, and Python tools live in `../shared/`. This `azure/` directory is a thin cloud-specific wrapper containing only:
-- `Makefile` — sets `CLOUD=azure` and includes `../shared/Makefile.shared`
-- `envs/` — Azure environment configs
-- `.github/workflows/` — Azure-specific CI (Azure Blob Storage state backend)
-- `docs/` — Azure-specific prerequisites and setup
-
-For AWS, see [`../aws/`](../aws/README.md).
 
 ## Documentation
 
