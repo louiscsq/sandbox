@@ -63,37 +63,64 @@ The generated `masking_functions.sql` will include country-specific UDFs (e.g. `
 
 ### Data flow
 
+The country overlay plugs into three stages of the normal generate → validate → apply pipeline:
+
 ```
-env.auto.tfvars (country = "ANZ")
-        │
-        ▼
-  make generate ── passes --country ANZ to generate_abac.py
-        │
-        ▼
-  load_country_overlays(["ANZ"])
-    → reads shared/countries/ANZ.yaml
-    → extracts prompt_overlay text
-        │
-        ▼
-  build_prompt()
-    → injects country overlay BEFORE "### MY TABLES" section
-    → LLM sees ANZ identifiers, regulations, and masking function signatures
-        │
-        ▼
-  LLM generates:
-    ├── masking_functions.sql  (includes mask_tfn, mask_medicare, mask_bsb, ...)
-    └── abac.auto.tfvars       (tag assignments referencing ANZ columns)
-        │
-        ▼
-  make validate ── passes --country ANZ to validate_abac.py
-    → _load_country_categories(["ANZ"])
-    → Extends column categorization hints  (tfn → government_id)
-    → Extends expected function categories  (mask_tfn → {government_id})
-    → Validates generated output against extended rules
-        │
-        ▼
-  make apply ── deploys masking functions + FGAC policies to Databricks
+┌─────────────────────────────────────────────────────────────────┐
+│  1. CONFIGURE                                                   │
+│                                                                 │
+│  env.auto.tfvars:  country = "ANZ"                              │
+│  (or CLI:          make generate COUNTRY=ANZ)                   │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  2. GENERATE  (make generate)                                   │
+│                                                                 │
+│  ┌──────────────────────┐    ┌────────────────────────────────┐ │
+│  │ shared/countries/    │    │ LLM prompt                     │ │
+│  │   ANZ.yaml           │───▶│                                │ │
+│  │                      │    │ [US defaults]                  │ │
+│  │ • identifiers (TFN,  │    │ + [ANZ overlay: TFN, Medicare, │ │
+│  │   Medicare, BSB...)  │    │    BSB, regulations, masking   │ │
+│  │ • masking functions  │    │    function signatures]        │ │
+│  │ • prompt_overlay     │    │ + [your table DDLs]            │ │
+│  └──────────────────────┘    └───────────────┬────────────────┘ │
+│                                              │                  │
+│                                              ▼                  │
+│                              ┌────────────────────────────────┐ │
+│                              │ LLM output                     │ │
+│                              │                                │ │
+│                              │ • masking_functions.sql         │ │
+│                              │   (mask_tfn, mask_medicare ...) │ │
+│                              │ • abac.auto.tfvars              │ │
+│                              │   (tags referencing ANZ cols)   │ │
+│                              └───────────────┬────────────────┘ │
+└──────────────────────────────────────────────┼──────────────────┘
+                                               │
+                                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  3. VALIDATE  (make validate)                                   │
+│                                                                 │
+│  ANZ.yaml identifiers extend the validation rules:              │
+│                                                                 │
+│  • Column hints:    tfn, tax_file_number  →  government_id      │
+│  • Function checks: mask_tfn must cover government_id columns   │
+│  • All US rules still apply — ANZ rules are additive            │
+└──────────────────────────────────────────────┬──────────────────┘
+                                               │
+                                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  4. APPLY  (make apply)                                         │
+│                                                                 │
+│  Deploys to Databricks (no country-specific logic here):        │
+│  • Creates masking UDFs (mask_tfn, mask_medicare, ...)          │
+│  • Applies tag assignments + FGAC policies                      │
+│  • Sets up Genie Spaces                                         │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+**Key insight:** The country overlay only affects stages 2 and 3. The YAML file teaches the LLM about your region's identifiers (generate) and extends the validation rules (validate). The apply stage is unchanged — Terraform deploys whatever the LLM produced.
 
 ### Key components
 
