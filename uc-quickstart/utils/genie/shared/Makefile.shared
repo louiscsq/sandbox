@@ -87,6 +87,8 @@ _prepare-env:
 	for env_name in $$envs; do \
 		if [ "$$env_name" = "$(ENV)" ] && [ "$(ENV_DIR)" != "$(CLOUD_ROOT)/envs/$(ENV)" ]; then \
 			env_dir="$(ENV_DIR)"; \
+		elif [ "$$env_name" = "$(ACCOUNT_ENV)" ] && [ "$(ACCOUNT_ENV_DIR)" != "$(CLOUD_ROOT)/envs/$(ACCOUNT_ENV)" ]; then \
+			env_dir="$(ACCOUNT_ENV_DIR)"; \
 		else \
 			env_dir="$(CLOUD_ROOT)/envs/$$env_name"; \
 		fi; \
