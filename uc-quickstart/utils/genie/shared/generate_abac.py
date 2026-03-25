@@ -1253,20 +1253,33 @@ def autofix_tag_policies(tfvars_path: Path) -> int:
         allowed[key] = list(dict.fromkeys(file_values + sorted(live_values - set(file_values))))
         raw_vals_text[key] = raw
 
+    # Collect tag_key/tag_value pairs from tag_assignments using HCL parsing
+    # (the regex approach with [^}]*? is fragile when blocks contain comments
+    # with closing braces).
     used: dict[str, set[str]] = {}
-    for m in re.finditer(
-        r'tag_key\s*=\s*"([^"]+)"[^}]*?tag_value\s*=\s*"([^"]+)"',
-        text,
-        re.DOTALL,
-    ):
-        used.setdefault(m.group(1), set()).add(m.group(2))
-    # Also check reverse order (tag_value before tag_key in the same block).
-    for m in re.finditer(
-        r'tag_value\s*=\s*"([^"]+)"[^}]*?tag_key\s*=\s*"([^"]+)"',
-        text,
-        re.DOTALL,
-    ):
-        used.setdefault(m.group(2), set()).add(m.group(1))
+    try:
+        import hcl2 as _hcl2_tp
+        import io as _io_tp
+        cfg = _hcl2_tp.load(_io_tp.StringIO(text))
+        for ta in cfg.get("tag_assignments", []):
+            if isinstance(ta, dict):
+                tk = ta.get("tag_key", "")
+                tv = ta.get("tag_value", "")
+                if tk and tv:
+                    used.setdefault(tk, set()).add(tv)
+    except Exception:
+        # Fallback to regex if HCL parsing fails (e.g. syntax errors in draft)
+        for m in re.finditer(
+            r'tag_key\s*=\s*"([^"]+)"[^}]*?tag_value\s*=\s*"([^"]+)"',
+            text, re.DOTALL,
+        ):
+            used.setdefault(m.group(1), set()).add(m.group(2))
+        for m in re.finditer(
+            r'tag_value\s*=\s*"([^"]+)"[^}]*?tag_key\s*=\s*"([^"]+)"',
+            text, re.DOTALL,
+        ):
+            used.setdefault(m.group(2), set()).add(m.group(1))
+    # Also collect from hasTagValue() in fgac_policies conditions
     for m in re.finditer(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", text):
         used.setdefault(m.group(1), set()).add(m.group(2))
 
