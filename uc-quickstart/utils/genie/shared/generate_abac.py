@@ -3646,8 +3646,8 @@ def main():
         _run_delta_mode(Path(args.auth_file))
         return
 
-    ddl_dir = Path(args.ddl_dir)
-    out_dir = Path(args.out_dir)
+    ddl_dir = Path(args.ddl_dir).resolve()
+    out_dir = Path(args.out_dir).resolve()
     auth_file = Path(args.auth_file)
 
     print("=" * 60)
