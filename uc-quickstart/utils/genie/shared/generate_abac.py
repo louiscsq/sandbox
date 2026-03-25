@@ -386,50 +386,58 @@ def format_genie_space_configs_hcl(configs: dict[str, dict]) -> str:
         if cfg.get("sql_filters"):
             lines.append("    sql_filters = [")
             for f in cfg["sql_filters"]:
-                lines.append("      {")
-                lines.append(f"        sql          = {_hcl_str(f['sql'])}")
-                lines.append(f"        display_name = {_hcl_str(f.get('display_name', ''))}")
-                lines.append(f"        comment      = {_hcl_str(f.get('comment', ''))}")
-                lines.append(f"        instruction  = {_hcl_str(f.get('instruction', ''))}")
-                lines.append("      },")
+                if isinstance(f, dict) and "sql" in f:
+                    lines.append("      {")
+                    lines.append(f"        sql          = {_hcl_str(f['sql'])}")
+                    lines.append(f"        display_name = {_hcl_str(f.get('display_name', ''))}")
+                    lines.append(f"        comment      = {_hcl_str(f.get('comment', ''))}")
+                    lines.append(f"        instruction  = {_hcl_str(f.get('instruction', ''))}")
+                    lines.append("      },")
+                # Skip malformed filters (e.g. plain strings from LLM)
             lines.append("    ]")
 
         if cfg.get("sql_expressions"):
             lines.append("    sql_expressions = [")
             for e in cfg["sql_expressions"]:
-                lines.append("      {")
-                lines.append(f"        alias        = {_hcl_str(e['alias'])}")
-                lines.append(f"        sql          = {_hcl_str(e['sql'])}")
-                lines.append(f"        display_name = {_hcl_str(e.get('display_name', ''))}")
-                lines.append(f"        comment      = {_hcl_str(e.get('comment', ''))}")
-                lines.append(f"        instruction  = {_hcl_str(e.get('instruction', ''))}")
-                lines.append("      },")
+                if isinstance(e, dict) and "alias" in e and "sql" in e:
+                    lines.append("      {")
+                    lines.append(f"        alias        = {_hcl_str(e['alias'])}")
+                    lines.append(f"        sql          = {_hcl_str(e['sql'])}")
+                    lines.append(f"        display_name = {_hcl_str(e.get('display_name', ''))}")
+                    lines.append(f"        comment      = {_hcl_str(e.get('comment', ''))}")
+                    lines.append(f"        instruction  = {_hcl_str(e.get('instruction', ''))}")
+                    lines.append("      },")
+                # Skip malformed expressions (e.g. plain strings from LLM)
             lines.append("    ]")
 
         if cfg.get("sql_measures"):
             lines.append("    sql_measures = [")
             for m in cfg["sql_measures"]:
-                lines.append("      {")
-                lines.append(f"        alias        = {_hcl_str(m['alias'])}")
-                lines.append(f"        sql          = {_hcl_str(m['sql'])}")
-                lines.append(f"        display_name = {_hcl_str(m.get('display_name', ''))}")
-                lines.append(f"        comment      = {_hcl_str(m.get('comment', ''))}")
-                lines.append(f"        instruction  = {_hcl_str(m.get('instruction', ''))}")
-                lines.append("      },")
+                if isinstance(m, dict) and "alias" in m and "sql" in m:
+                    lines.append("      {")
+                    lines.append(f"        alias        = {_hcl_str(m['alias'])}")
+                    lines.append(f"        sql          = {_hcl_str(m['sql'])}")
+                    lines.append(f"        display_name = {_hcl_str(m.get('display_name', ''))}")
+                    lines.append(f"        comment      = {_hcl_str(m.get('comment', ''))}")
+                    lines.append(f"        instruction  = {_hcl_str(m.get('instruction', ''))}")
+                    lines.append("      },")
+                # Skip malformed measures (e.g. plain strings from LLM)
             lines.append("    ]")
 
         if cfg.get("join_specs"):
             lines.append("    join_specs = [")
             for j in cfg["join_specs"]:
-                lines.append("      {")
-                lines.append(f"        left_table   = {_hcl_str(j['left_table'])}")
-                lines.append(f"        right_table  = {_hcl_str(j['right_table'])}")
-                lines.append(f"        sql          = {_hcl_str(j['sql'])}")
-                lines.append(f"        comment      = {_hcl_str(j.get('comment', ''))}")
-                lines.append(f"        instruction  = {_hcl_str(j.get('instruction', ''))}")
-                lines.append(f"        left_alias   = {_hcl_str(j.get('left_alias', ''))}")
-                lines.append(f"        right_alias  = {_hcl_str(j.get('right_alias', ''))}")
-                lines.append("      },")
+                if isinstance(j, dict) and "left_table" in j and "right_table" in j and "sql" in j:
+                    lines.append("      {")
+                    lines.append(f"        left_table   = {_hcl_str(j['left_table'])}")
+                    lines.append(f"        right_table  = {_hcl_str(j['right_table'])}")
+                    lines.append(f"        sql          = {_hcl_str(j['sql'])}")
+                    lines.append(f"        comment      = {_hcl_str(j.get('comment', ''))}")
+                    lines.append(f"        instruction  = {_hcl_str(j.get('instruction', ''))}")
+                    lines.append(f"        left_alias   = {_hcl_str(j.get('left_alias', ''))}")
+                    lines.append(f"        right_alias  = {_hcl_str(j.get('right_alias', ''))}")
+                    lines.append("      },")
+                # Skip malformed join_specs (e.g. plain strings from LLM)
             lines.append("    ]")
 
         lines.append("  }")
@@ -1176,6 +1184,20 @@ def fix_hcl_syntax(tfvars_path: Path) -> int:
     if fixed2 != text:
         repairs += 1
         text = fixed2
+
+    # ------------------------------------------------------------------
+    # Fix 3: strip Terraform variable references ("${var.*}") from tfvars.
+    # The LLM sometimes emits e.g. benchmarks = "${var.genie_benchmarks}"
+    # which is illegal in .tfvars files.  Replace with an empty list.
+    # ------------------------------------------------------------------
+    fixed3 = re.sub(
+        r'(\b(?:genie_)?(?:benchmarks|sql_filters|sql_expressions|sql_measures|join_specs)\s*=\s*)"?\$\$?\{var\.[^}]+\}"?',
+        r'\1[]',
+        text,
+    )
+    if fixed3 != text:
+        repairs += 1
+        text = fixed3
 
     if text != original:
         tfvars_path.write_text(text)
@@ -4306,12 +4328,12 @@ Before you apply, tune for your business roles, security requirements, and Genie
     print("  Done!")
     if hcl_block:
         if args.promote:
-            env_name = Path.cwd().name
+            env_name = WORK_DIR.name
             env_suffix = f" ENV={env_name}" if env_name != "dev" else ""
             print("  Files promoted into the current env workspace. Next step:")
             print(f"    make apply{env_suffix}   (or: terraform init && terraform apply -parallelism=1)")
         elif args.space:
-            env_name = Path.cwd().name
+            env_name = WORK_DIR.name
             env_suffix = f" ENV={env_name}" if env_name != "dev" else ""
             assembled_dir = out_dir.parent.parent
             print(f"  Per-space output: {out_dir.resolve()}")
@@ -4322,7 +4344,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
             print(f"    3. make validate-generated{env_suffix}")
             print(f"    4. make apply{env_suffix}")
         else:
-            env_name = Path.cwd().name
+            env_name = WORK_DIR.name
             env_suffix = f" ENV={env_name}" if env_name != "dev" else ""
             print("  Next steps:")
             print(f"    1. Review the tuning checklist:")

@@ -174,6 +174,19 @@ def reconcile_tag_policy_values(account_cfg: dict, data_access_cfg: dict) -> Non
             print(f"  [SPLIT-REPAIR] Added '{val}' to account tag_policy '{key}'")
 
 
+def _strip_var_refs(space_cfg: dict) -> dict:
+    """Remove ${var.*} string values from a genie_space_configs entry.
+
+    The LLM sometimes hallucinates Terraform variable references for optional
+    list fields (benchmarks, sql_filters, etc.).  These are illegal in .tfvars
+    files, so strip them.
+    """
+    return {
+        k: v for k, v in space_cfg.items()
+        if not (isinstance(v, str) and "${var." in v)
+    }
+
+
 def build_workspace_config(full_cfg: dict) -> dict:
     cfg: dict = {}
     for key in WORKSPACE_KEYS:
@@ -181,6 +194,15 @@ def build_workspace_config(full_cfg: dict) -> dict:
             continue
         value = full_cfg[key]
         if value in ("", [], {}):
+            continue
+        # Sanitize genie_space_configs: strip ${var.*} refs from each space
+        if key == "genie_space_configs" and isinstance(value, dict):
+            value = {
+                name: _strip_var_refs(sc) if isinstance(sc, dict) else sc
+                for name, sc in value.items()
+            }
+        # Also strip top-level legacy keys with ${var.*} values
+        if isinstance(value, str) and "${var." in value:
             continue
         cfg[key] = value
     return cfg

@@ -519,7 +519,13 @@ sql_warehouse_id = ""   # auto-create serverless warehouse
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _ensure_catalog(w, name: str, comment: str = "", storage_root: str | None = None) -> None:
+def _ensure_catalog(
+    w,
+    name: str,
+    comment: str = "",
+    storage_root: str | None = None,
+    warehouse_id: str = "",
+) -> None:
     """Create a catalog via the UC API.
 
     When ``storage_root`` is provided (e.g. when running against a provisioned
@@ -527,6 +533,10 @@ def _ensure_catalog(w, name: str, comment: str = "", storage_root: str | None = 
     unique S3 subfolder under the External Location registered by
     provision_test_env.py.  When ``storage_root`` is None the metastore's
     default managed storage is used.
+
+    If the SDK call fails because "Default Storage" is enabled on the account
+    (metastore has no root URL), we retry using SQL ``CREATE CATALOG ... MANAGED
+    LOCATION`` which is the supported path for Default Storage accounts.
     """
     from databricks.sdk.errors import ResourceAlreadyExists
 
@@ -546,6 +556,14 @@ def _ensure_catalog(w, name: str, comment: str = "", storage_root: str | None = 
         # match (can happen with older SDK builds or slightly different API shapes).
         if "already exists" in str(exc).lower():
             print(f"    Catalog already exists (skipping): {name}")
+        elif "default storage" in str(exc).lower() and storage_root and warehouse_id:
+            # Account has "Default Storage" enabled — the SDK storage_root param
+            # doesn't work.  Fall back to SQL MANAGED LOCATION syntax.
+            print(f"    Default Storage account detected — retrying via SQL MANAGED LOCATION")
+            sql = f"CREATE CATALOG IF NOT EXISTS `{name}` MANAGED LOCATION '{storage_root}'"
+            if comment:
+                sql += f" COMMENT '{comment}'"
+            _run_statement(w, warehouse_id, sql, f"CREATE CATALOG {name} MANAGED LOCATION")
         else:
             print(f"    ERROR creating catalog {name!r}: {exc}")
             sys.exit(1)
@@ -971,9 +989,9 @@ def main():
     # ── Dev setup ──────────────────────────────────────────────────────────
     print(f"\n  Creating dev catalogs, schemas, and tables...")
     _ensure_catalog(w, FIN_CATALOG,      "Finance domain — dev. Promotion target: prod_fin.",
-                    storage_root=_catalog_storage(FIN_CATALOG))
+                    storage_root=_catalog_storage(FIN_CATALOG), warehouse_id=warehouse_id)
     _ensure_catalog(w, CLINICAL_CATALOG, "Clinical domain — dev. Promotion target: prod_clinical.",
-                    storage_root=_catalog_storage(CLINICAL_CATALOG))
+                    storage_root=_catalog_storage(CLINICAL_CATALOG), warehouse_id=warehouse_id)
     setup_stmts = _split_statements(SETUP_SQL)
     for i, stmt in enumerate(setup_stmts, 1):
         label = stmt.split("\n")[0].strip().lstrip("-").strip()
@@ -988,9 +1006,9 @@ def main():
     if args.prod:
         print(f"\n  Creating prod catalogs, schemas, and tables...")
         _ensure_catalog(w, PROD_FIN_CATALOG,      "Finance domain — prod.",
-                        storage_root=_catalog_storage(PROD_FIN_CATALOG))
+                        storage_root=_catalog_storage(PROD_FIN_CATALOG), warehouse_id=warehouse_id)
         _ensure_catalog(w, PROD_CLINICAL_CATALOG, "Clinical domain — prod.",
-                        storage_root=_catalog_storage(PROD_CLINICAL_CATALOG))
+                        storage_root=_catalog_storage(PROD_CLINICAL_CATALOG), warehouse_id=warehouse_id)
         prod_setup_stmts = _split_statements(PROD_SETUP_SQL)
         for i, stmt in enumerate(prod_setup_stmts, 1):
             label = stmt.split("\n")[0].strip().lstrip("-").strip()

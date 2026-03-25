@@ -690,6 +690,75 @@ def _force_delete_tag_policies(*envs: str) -> None:
             print(f"  WARN: force_delete_tag_policies({env}) failed: {exc}")
 
 
+def _wait_for_tag_policy_deletion(*envs: str, max_wait: int = 60, poll_interval: int = 10) -> None:
+    """Poll until all our snake_case tag policies are confirmed deleted.
+
+    Databricks tag policy deletions are eventually consistent — the API may
+    still list a policy for several seconds after DELETE returns 200.  This
+    helper blocks until no snake_case policies remain, preventing the next
+    scenario's Terraform apply from hitting 'Tag policy already exists'.
+    """
+    for env in envs:
+        auth_file = ENVS_DIR / env / "auth.auto.tfvars"
+        if not auth_file.exists():
+            auth_file = ENVS_DIR / "dev" / "auth.auto.tfvars"
+        if not auth_file.exists():
+            continue
+        try:
+            import hcl2 as _hcl2
+            from databricks.sdk import WorkspaceClient as _WC
+            import ssl as _ssl, urllib.request as _urq, json as _json
+
+            def _s(v): return (v[0] if isinstance(v, list) else (v or "")).strip()
+
+            with open(auth_file) as f:
+                auth = _hcl2.load(f)
+            host          = _s(auth.get("databricks_workspace_host", ""))
+            client_id     = _s(auth.get("databricks_client_id", ""))
+            client_secret = _s(auth.get("databricks_client_secret", ""))
+            if not host:
+                continue
+            w = _WC(host=host, client_id=client_id, client_secret=client_secret)
+
+            def _list_our_policies():
+                """Return list of snake_case tag policy keys still visible."""
+                try:
+                    policies = list(w.tag_policies.list_tag_policies())
+                except Exception:
+                    try:
+                        policies = list(w.tag_policies.list())
+                    except Exception:
+                        # REST fallback
+                        _ctx = _ssl.create_default_context()
+                        _ctx.check_hostname = False
+                        _ctx.verify_mode = _ssl.CERT_NONE
+                        token = w.config.authenticate()
+                        req = _urq.Request(f"{host.rstrip('/')}/api/2.1/unity-catalog/tag-policies", headers=token)
+                        with _urq.urlopen(req, timeout=30, context=_ctx) as resp:
+                            data = _json.loads(resp.read())
+                        policies = [type("P", (), {"tag_key": p.get("tag_key")})()
+                                    for p in data.get("tag_policies", [])]
+                return [getattr(p, "tag_key", "") for p in policies
+                        if _OUR_TAG_KEY_RE.match(getattr(p, "tag_key", "") or "")]
+
+            elapsed = 0
+            while elapsed < max_wait:
+                remaining = _list_our_policies()
+                if not remaining:
+                    print(f"  Tag policies confirmed deleted ({elapsed}s).")
+                    break
+                print(f"  Waiting for {len(remaining)} tag policy deletion(s) to propagate... ({elapsed}s)")
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+            else:
+                remaining = _list_our_policies()
+                if remaining:
+                    print(f"  WARN: {len(remaining)} tag policy/ies still visible after {max_wait}s: {remaining}")
+            break  # only need one env's auth
+        except Exception as exc:
+            print(f"  WARN: _wait_for_tag_policy_deletion failed: {exc}")
+
+
 def _force_delete_fgac_policies(*envs: str, all_catalogs: bool = False) -> None:
     """Best-effort API-level deletion of all FGAC policies for all test catalogs.
 
@@ -1226,9 +1295,20 @@ def _preamble_cleanup(*envs: str, fresh_env: bool = False) -> None:
     # We destroy using state files when they exist, then wipe all artifacts.
     if fresh_env:
         print("  Fresh metastore — destroying prior scenario state (if any).")
+        # Track auth file existence through cleanup for diagnostics.
+        _auth_probe = ENVS_DIR / "dev" / "auth.auto.tfvars"
+        def _auth_check(label: str) -> None:
+            exists = _auth_probe.exists()
+            if not exists:
+                print(f"  {_yellow('DIAG')} auth.auto.tfvars MISSING after: {label}")
+                # Check if the parent directory still exists
+                if not _auth_probe.parent.exists():
+                    print(f"  {_yellow('DIAG')}   parent dir ALSO missing: {_auth_probe.parent}")
         for env in envs:
             _try_destroy(env)
+            _auth_check(f"_try_destroy({env})")
         _try_destroy_account()
+        _auth_check("_try_destroy_account")
         # Explicitly delete groups, tag policies, and tag assignments via API
         # in case terraform destroy missed them (e.g. they were never in state
         # due to import failures or a partially-failed apply).
@@ -1236,13 +1316,22 @@ def _preamble_cleanup(*envs: str, fresh_env: bool = False) -> None:
         _force_delete_tag_policies(*envs)
         _force_delete_tag_assignments(*envs)
         _force_delete_fgac_policies(*envs, all_catalogs=True)
-        # Wait for tag assignment deletions to propagate, then retry to catch
-        # any that survived the first pass (Databricks eventual consistency).
+        _auth_check("force_delete_*")
+        # Wait for deletions to propagate (Databricks eventual consistency),
+        # then retry tag policies and tag assignments to catch any that
+        # survived the first pass.
         time.sleep(15)
+        _force_delete_tag_policies(*envs)
         _force_delete_tag_assignments(*envs)
+        # Block until tag policies are confirmed gone — prevents "already exists"
+        # errors when the next scenario's Terraform apply tries to create them.
+        _wait_for_tag_policy_deletion(*envs)
+        _auth_check("wait_for_tag_policy_deletion")
         for env in envs:
             _clean_env_artifacts(env)
+        _auth_check("_clean_env_artifacts")
         _clean_account_artifacts()
+        _auth_check("_clean_account_artifacts")
         return
 
     for env in envs:
@@ -1257,10 +1346,15 @@ def _preamble_cleanup(*envs: str, fresh_env: bool = False) -> None:
     _force_delete_fgac_policies(*envs, all_catalogs=True)
     # 3. Delete column-level tag assignments.
     _force_delete_tag_assignments(*envs)
-    # Wait for tag assignment deletions to propagate, then retry to catch
-    # any that survived the first pass (Databricks eventual consistency).
+    # Wait for deletions to propagate (Databricks eventual consistency),
+    # then retry tag policies and tag assignments to catch any that
+    # survived the first pass.
     time.sleep(15)
+    _force_delete_tag_policies(*envs)
     _force_delete_tag_assignments(*envs)
+    # Block until tag policies are confirmed gone — prevents "already exists"
+    # errors when the next scenario's Terraform apply tries to create them.
+    _wait_for_tag_policy_deletion(*envs)
     # 4. Drop test catalogs LAST.
     _drop_test_catalogs(*envs)
     # On a shared/long-lived metastore the FGAC estimated counter can lag
