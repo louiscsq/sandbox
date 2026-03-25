@@ -1236,6 +1236,10 @@ def _preamble_cleanup(*envs: str, fresh_env: bool = False) -> None:
         _force_delete_tag_policies(*envs)
         _force_delete_tag_assignments(*envs)
         _force_delete_fgac_policies(*envs, all_catalogs=True)
+        # Wait for tag assignment deletions to propagate, then retry to catch
+        # any that survived the first pass (Databricks eventual consistency).
+        time.sleep(15)
+        _force_delete_tag_assignments(*envs)
         for env in envs:
             _clean_env_artifacts(env)
         _clean_account_artifacts()
@@ -1252,6 +1256,10 @@ def _preamble_cleanup(*envs: str, fresh_env: bool = False) -> None:
     # 2. Delete FGAC policies from ALL non-system catalogs in the workspace.
     _force_delete_fgac_policies(*envs, all_catalogs=True)
     # 3. Delete column-level tag assignments.
+    _force_delete_tag_assignments(*envs)
+    # Wait for tag assignment deletions to propagate, then retry to catch
+    # any that survived the first pass (Databricks eventual consistency).
+    time.sleep(15)
     _force_delete_tag_assignments(*envs)
     # 4. Drop test catalogs LAST.
     _drop_test_catalogs(*envs)
