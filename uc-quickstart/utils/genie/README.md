@@ -45,7 +45,7 @@ All docs live in `shared/docs/`:
 - [CI/CD Integration](shared/docs/cicd.md) — validate and deploy from a pipeline
 - [Troubleshooting](shared/docs/troubleshooting.md) — imports, provider quirks, brownfield workflows
 - [Advanced Usage](shared/docs/advanced.md) — IDP-synced groups, ABAC-only mode, masking UDF reuse, legacy migration
-- [Country & Region Overlays (APJ)](shared/docs/country-overlays.md) — region-specific PII patterns, masking functions, and regulatory context for ANZ, India, and Southeast Asia
+- [Country & Region Overlays (APJ)](shared/docs/country-overlays.md) — using, tuning, or adding country-specific PII governance (ANZ, India, Southeast Asia); contributor guide for new regions
 - [Integration Testing](shared/docs/integration-testing.md) — unit tests, integration scenarios, test data
 
 ## Testing

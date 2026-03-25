@@ -646,9 +646,14 @@ make generate COUNTRY=ANZ,IN,SEA    # multi-region
 - `abac.auto.tfvars` includes tag assignments and FGAC policies referencing those functions
 - Validation checks against extended country-specific column patterns
 
-### Adding a new country
+### Tuning an existing country or adding a new one
 
-Create a YAML file in `shared/countries/<CODE>.yaml` — no code changes needed. See [country-overlays.md](country-overlays.md) for the full contributor guide, YAML structure, and FAQ.
+Each country overlay is a self-contained YAML file in `shared/countries/` — no Python, Terraform, or Makefile changes are needed.
+
+- **Tune an existing region:** Edit the YAML file (e.g. `shared/countries/ANZ.yaml`) to add identifiers, adjust column hints, refine masking functions, or improve the prompt overlay text.
+- **Add a new region:** Create `shared/countries/<CODE>.yaml` using an existing file as a template (e.g. copy `ANZ.yaml` → `JP.yaml`).
+
+See [country-overlays.md](country-overlays.md) for the full contributor guide — YAML structure, field reference, masking function guidelines, prompt overlay writing tips, and FAQ.
 
 > **Tested:** `make test-country-overlay` validates ANZ, IN, SEA, and multi-region generation end-to-end.
 

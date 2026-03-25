@@ -2,6 +2,8 @@
 
 This document explains how the country overlay system works, how to use it, and how to add support for a new country or region.
 
+> **Contributors:** Jump to [Adding a new country](#adding-a-new-country) for the step-by-step guide to creating or tuning a country overlay. No Python, Terraform, or Makefile changes are needed — just a single YAML file.
+
 ---
 
 ## Overview
