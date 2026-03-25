@@ -16,6 +16,7 @@ This document covers the main use cases for deploying and managing Genie Spaces 
 | [F. Independent BU environment](#scenario-f-create-an-independent-bu-environment) | BU needs its own groups, governance, and Genie spaces | `make setup ENV=bu2` → `make generate ENV=bu2` → `make apply ENV=bu2` |
 | [G. Central governance, self-service Genie](#scenario-g-central-governance-self-service-genie) | Central ABAC team + BU teams self-serve Genie spaces | `make generate MODE=governance` / `make generate MODE=genie` |
 | [H. Import Genie Space to prod (no ABAC)](#scenario-h-import-genie-space-to-prod-without-abac) | Import a UI-created Genie Space and deploy to prod when ABAC is managed separately | `make generate MODE=genie` (with `genie_space_id` + `genie_only=true`) → `make apply-genie` → `make promote` |
+| [I. APJ / non-US region](#scenario-i-apj--non-us-region-country-overlays) | Dataset contains non-US PII (ANZ, India, Southeast Asia) | Set `country = "ANZ"` → `make generate` → `make apply` |
 
 ### How layers are applied
 
@@ -606,6 +607,50 @@ make apply-genie ENV=bu_import_prod
 All governance is managed separately by the central team via `make apply-governance`.
 
 > **Tested:** `make test-genie-import-no-abac` validates this workflow end-to-end. See [integration-testing.md](integration-testing.md) for details.
+
+---
+
+## Scenario I: APJ / non-US region (country overlays)
+
+Use this when your dataset contains non-US personally identifiable information — for example, Australian TFNs, Indian Aadhaar numbers, or Singaporean NRICs. The country overlay system injects region-specific identifier knowledge, masking functions, and regulatory context into the LLM prompt so it produces governance appropriate for your region.
+
+This works with any scenario above (quickstart, multi-space, promote, etc.) — just add the `country` setting.
+
+### Supported regions
+
+| Code | Region | Key identifiers |
+|------|--------|--------------------|
+| `ANZ` | Australia & New Zealand | TFN, Medicare, BSB, IRD, NHI |
+| `IN` | India | Aadhaar, PAN, GSTIN, IFSC, UPI |
+| `SEA` | Singapore & Malaysia | NRIC, FIN, MyKad, UEN, EPF |
+
+### Steps
+
+```bash
+# Option 1: Set in env.auto.tfvars (persistent)
+# Edit envs/dev/env.auto.tfvars and set:
+#   country = "ANZ"            # single region
+#   country = "ANZ,SEA"        # multi-region dataset
+
+make generate
+make apply
+
+# Option 2: Override via CLI (one-off, takes priority over env.auto.tfvars)
+make generate COUNTRY=ANZ
+make generate COUNTRY=ANZ,IN,SEA    # multi-region
+```
+
+### What changes
+
+- `masking_functions.sql` includes country-specific UDFs (e.g. `mask_tfn`, `mask_aadhaar`, `mask_nric`)
+- `abac.auto.tfvars` includes tag assignments and FGAC policies referencing those functions
+- Validation checks against extended country-specific column patterns
+
+### Adding a new country
+
+Create a YAML file in `shared/countries/<CODE>.yaml` — no code changes needed. See [country-overlays.md](country-overlays.md) for the full contributor guide, YAML structure, and FAQ.
+
+> **Tested:** `make test-country-overlay` validates ANZ, IN, SEA, and multi-region generation end-to-end.
 
 ---
 
